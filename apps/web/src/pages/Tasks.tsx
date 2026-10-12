@@ -20,7 +20,7 @@ import { IconBoard, IconSearch, IconList } from '../components/icons';
 import { Avatar, CATEGORY_HUE, HUE, HueDot, ProjectName } from '../components/hue';
 import { useAuth } from '../context/AuthContext';
 import {
-  daysEarly, useAddComment, useDeleteTask, useTaskDetail, useTasks, useTeam, useUpdateTask,
+  daysEarly, useAddComment, useDeleteComment, useDeleteTask, useProjects, useTaskDetail, useTasks, useTeam, useUpdateComment, useUpdateTask,
   type TaskComment, type TaskView, type TeamMember,
 } from '../lib/queries';
 import { DatePicker } from '../components/DatePicker';
@@ -127,13 +127,17 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
  * how a mention reaches the wrong Joanna, or nobody.
  */
 function CommentThread({
-  taskId, comments, available,
-}: { taskId: string; comments: TaskComment[]; available: boolean }) {
+  taskId, comments, available, userId,
+}: { taskId: string; comments: TaskComment[]; available: boolean; userId: string | undefined }) {
   const team = useTeam().data;
   const add = useAddComment(taskId);
+  const editComment = useUpdateComment(taskId);
+  const deleteComment = useDeleteComment(taskId);
   const [draft, setDraft] = useState('');
   const [picked, setPicked] = useState<string[]>([]);
   const boxRef = useRef<HTMLTextAreaElement>(null);
+  // Which comment is in inline-edit mode, and its current text.
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
 
   /*
    * The word being typed after an "@", if the caret is still inside it.
@@ -196,19 +200,97 @@ function CommentThread({
 
       {comments.length > 0 && (
         <ul className="mb-2 flex flex-col gap-2">
-          {comments.map((c) => (
-            <li key={c.id} className="rounded-lg border border-line-soft bg-surface px-3 py-2">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="text-[12.5px] font-semibold text-ink">
-                  {c.profiles?.full_name ?? 'A former teammate'}
-                </span>
-                <span className="shrink-0 text-[11.5px] text-ink-faint">{shortDate(c.created_at)}</span>
-              </div>
-              {/* whitespace-pre-wrap: people write these in lines, and a
-                  paragraph collapsed into one run is unreadable. */}
-              <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-relaxed text-ink-soft">{c.body}</p>
-            </li>
-          ))}
+          {comments.map((c) => {
+            const isAuthor = !!userId && c.author === userId;
+            const isEditing = editing?.id === c.id;
+            return (
+              <li key={c.id} className="group rounded-lg border border-line-soft bg-surface px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12.5px] font-semibold text-ink">
+                    {c.profiles?.full_name ?? 'A former teammate'}
+                  </span>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <span className="text-[11.5px] text-ink-faint">{shortDate(c.created_at)}</span>
+                    {isAuthor && !isEditing && (
+                      <>
+                        <button
+                          type="button"
+                          title="Edit comment"
+                          onClick={() => setEditing({ id: c.id, text: c.body })}
+                          className="focusable ml-1 rounded px-1 py-0.5 text-[11px] text-ink-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          title="Delete comment"
+                          disabled={deleteComment.isPending}
+                          onClick={() => deleteComment.mutate(c.id)}
+                          className="focusable rounded px-1 py-0.5 text-[11px] text-ink-faint opacity-0 transition-opacity hover:text-crit group-hover:opacity-100"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {isEditing ? (
+                  <div className="mt-1.5">
+                    <textarea
+                      className="input min-h-[56px] resize-y text-[13px]"
+                      value={editing.text}
+                      autoFocus
+                      onChange={(e) => setEditing({ id: c.id, text: e.target.value })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          const body = editing.text.trim();
+                          if (!body || editComment.isPending) return;
+                          editComment.mutate(
+                            { commentId: c.id, body },
+                            { onSuccess: () => setEditing(null) },
+                          );
+                        }
+                        if (e.key === 'Escape') setEditing(null);
+                      }}
+                    />
+                    <div className="mt-1.5 flex items-center gap-2">
+                      {editComment.isError && (
+                        <span className="text-[11.5px] text-crit">{(editComment.error as Error).message}</span>
+                      )}
+                      <div className="ml-auto flex gap-1.5">
+                        <button
+                          type="button"
+                          className="btn-ghost btn-sm"
+                          onClick={() => setEditing(null)}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary btn-sm"
+                          disabled={!editing.text.trim() || editComment.isPending}
+                          onClick={() => {
+                            const body = editing.text.trim();
+                            if (!body) return;
+                            editComment.mutate(
+                              { commentId: c.id, body },
+                              { onSuccess: () => setEditing(null) },
+                            );
+                          }}
+                        >
+                          {editComment.isPending ? 'Saving…' : 'Save'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-0.5 whitespace-pre-wrap text-[13px] leading-relaxed text-ink-soft">{c.body}</p>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -293,7 +375,17 @@ function CommentThread({
 function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
   const { data, isLoading, isError, error } = useTaskDetail(id);
   const team = useTeam().data;
+  const projects = useProjects().data;
   const updateTask = useUpdateTask();
+  const { user } = useAuth();
+
+  // Tell the shell that a full-screen overlay is open so it does not
+  // compress the board for Jenny's side panel — the board is already
+  // behind this backdrop and the reflow would be visible through it.
+  useEffect(() => {
+    document.documentElement.dataset.taskPanelOpen = 'true';
+    return () => { delete document.documentElement.dataset.taskPanelOpen; };
+  }, []);
 
   // Escape closes it, like every other overlay the studio uses.
   useEffect(() => {
@@ -378,7 +470,20 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
               <Field label="Due">
                 {t.due_date ? shortDate(t.due_date) : <span className="text-warn">No due date</span>}
               </Field>
-              <Field label="Project">{t.projects?.name ?? t.vendors?.name ?? '—'}</Field>
+              <Field label="Project">
+                <select
+                  aria-label="Task project"
+                  className="focusable -ml-1 rounded-md border border-line bg-surface px-1.5 py-0.5 text-[13.5px] text-ink"
+                  value={t.project_id ?? ''}
+                  disabled={updateTask.isPending}
+                  onChange={(e) => updateTask.mutate({ id, project_id: e.target.value || null })}
+                >
+                  <option value="">— No project —</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </Field>
               <Field label="Category">
                 <select
                   aria-label="Task category"
@@ -451,6 +556,7 @@ function TaskPanel({ id, onClose }: { id: string; onClose: () => void }) {
               taskId={id}
               comments={data?.comments ?? []}
               available={data?.commentsAvailable !== false}
+              userId={user?.id}
             />
 
             {/* What has happened since. Reminders and escalations are the

@@ -179,16 +179,19 @@ export function AssistantPanel() {
   if (!open || onPage) return null;
 
   return (
-    <aside
-      aria-label={ASSISTANT_NAME}
-      className="assistant-drawer fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-line bg-surface shadow-pop sm:w-[440px]"
-    >
-      <PanelHeader showingHistory={history} toggleHistory={() => setHistory((v) => !v)} />
-      {history ? (
-        <AssistantHistory onOpened={() => setHistory(false)} onNew={() => setHistory(false)} />
-      ) : (
-        <AssistantChat compact />
-      )}
-    </aside>
+    <>
+      <div className="fixed inset-0 z-40 bg-black/30" onClick={() => setOpen(false)} aria-hidden />
+      <aside
+        aria-label={ASSISTANT_NAME}
+        className="assistant-drawer fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-line bg-surface shadow-pop sm:w-[440px]"
+      >
+        <PanelHeader showingHistory={history} toggleHistory={() => setHistory((v) => !v)} />
+        {history ? (
+          <AssistantHistory onOpened={() => setHistory(false)} onNew={() => setHistory(false)} />
+        ) : (
+          <AssistantChat compact />
+        )}
+      </aside>
+    </>
   );
 }

@@ -242,6 +242,69 @@ tasksRouter.post(
   }),
 );
 
+// Edit a comment body. Only the author may change what they wrote.
+tasksRouter.patch(
+  '/:id/comments/:commentId',
+  requirePermission('tasks', 'update'),
+  asyncHandler(async (req, res) => {
+    if (!(await hasTaskComments())) {
+      return res.status(503).json({ error: 'Comments not available' });
+    }
+    const body = String(req.body?.body ?? '').trim();
+    if (!body) return res.status(400).json({ error: 'Body cannot be empty' });
+
+    const { db, userId } = req.auth!;
+    const { data: existing } = await db
+      .from('task_comments')
+      .select('id, author')
+      .eq('id', req.params.commentId)
+      .eq('task_id', req.params.id)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ error: 'Comment not found' });
+    if ((existing as { author: string }).author !== userId) {
+      return res.status(403).json({ error: 'You can only edit your own comments' });
+    }
+
+    const { data, error } = await db
+      .from('task_comments')
+      .update({ body: body.slice(0, 4000) })
+      .eq('id', req.params.commentId)
+      .select('id, body, created_at, author, profiles(full_name)')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ data });
+  }),
+);
+
+// Delete a comment. Only the author may remove it.
+tasksRouter.delete(
+  '/:id/comments/:commentId',
+  requirePermission('tasks', 'update'),
+  asyncHandler(async (req, res) => {
+    if (!(await hasTaskComments())) {
+      return res.status(503).json({ error: 'Comments not available' });
+    }
+    const { db, userId } = req.auth!;
+    const { data: existing } = await db
+      .from('task_comments')
+      .select('id, author')
+      .eq('id', req.params.commentId)
+      .eq('task_id', req.params.id)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ error: 'Comment not found' });
+    if ((existing as { author: string }).author !== userId) {
+      return res.status(403).json({ error: 'You can only delete your own comments' });
+    }
+
+    const { error } = await db
+      .from('task_comments')
+      .delete()
+      .eq('id', req.params.commentId);
+    if (error) throw new Error(error.message);
+    res.json({ data: { id: req.params.commentId } });
+  }),
+);
+
 // Update a task's status and/or its assignee.
 tasksRouter.patch(
   '/:id',
@@ -279,6 +342,10 @@ tasksRouter.patch(
         return res.status(409).json({ error: 'Categories need migration 0026_task_category.sql applied first.' });
       }
       patch.category = b.category;
+    }
+
+    if ('project_id' in b) {
+      patch.project_id = b.project_id ? String(b.project_id) : null;
     }
 
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'No fields to update' });

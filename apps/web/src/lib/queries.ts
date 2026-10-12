@@ -1232,7 +1232,7 @@ export function useImportHouzz() {
 export function useUpdateTask() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null; due_date?: string | null; next_step?: string | null; category?: TaskCategory }) => {
+    mutationFn: (v: { id: string; status?: TaskStatus; assigned_to?: string | null; due_date?: string | null; next_step?: string | null; category?: TaskCategory; project_id?: string | null }) => {
       const { id, ...patch } = v;
       return api(`/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
     },
@@ -1272,6 +1272,12 @@ export function useUpdateTask() {
 
           if (v.next_step !== undefined) next.nextStep = v.next_step;
           if (v.category !== undefined) next.category = v.category;
+
+          if (v.project_id !== undefined) {
+            const projects = qc.getQueryData<ProjectView[]>(['projects']) ?? [];
+            const proj = projects.find((p) => p.id === v.project_id);
+            next.project = proj?.name ?? '—';
+          }
 
           if (v.assigned_to !== undefined) {
             next.assignedTo = v.assigned_to;
@@ -1388,6 +1394,7 @@ export interface TaskDetail {
      * `completion_note` says why) or when it was closed before 0032.
      */
     completed_by?: string | null;
+    project_id?: string | null;
     projects: { name: string } | null;
     vendors: { name: string } | null;
     profiles: { full_name: string | null; email: string | null } | null;
@@ -1428,6 +1435,33 @@ export function useAddComment(taskId: string | null) {
       // Someone else's bell, not this person's — but the panel may be open
       // on two screens, and a mention of yourself is filtered server-side.
       qc.invalidateQueries({ queryKey: ['mentions'] });
+    },
+  });
+}
+
+/** Fix a typo or clarify what you wrote. Only the author can edit. */
+export function useUpdateComment(taskId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ commentId, body }: { commentId: string; body: string }) =>
+      api(`/tasks/${taskId}/comments/${commentId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ body }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['task', taskId] });
+    },
+  });
+}
+
+/** Remove a comment for good. Only the author can delete. */
+export function useDeleteComment(taskId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (commentId: string) =>
+      api(`/tasks/${taskId}/comments/${commentId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['task', taskId] });
     },
   });
 }
