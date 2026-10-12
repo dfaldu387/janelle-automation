@@ -641,7 +641,23 @@ export function AppShell({ children }: { children: ReactNode }) {
   // rather than sitting underneath it: the point of asking beside the page
   // is being able to see the page.
   const assistant = useAssistant();
-  const docked = assistant.open && base !== '/assistant';
+
+  // When a full-screen overlay (e.g. the task detail panel) is open it sets
+  // data-task-panel-open on <html>. In that case the board is already hidden
+  // behind a backdrop, so compressing it for Jenny's side panel would just
+  // cause a visible reflow behind the overlay. Suppress the padding instead.
+  const [overlayOpen, setOverlayOpen] = useState(
+    () => document.documentElement.dataset.taskPanelOpen === 'true',
+  );
+  useEffect(() => {
+    const obs = new MutationObserver(() => {
+      setOverlayOpen(document.documentElement.dataset.taskPanelOpen === 'true');
+    });
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-task-panel-open'] });
+    return () => obs.disconnect();
+  }, []);
+
+  const docked = assistant.open && base !== '/assistant' && !overlayOpen;
 
   // Full-screen overlays — the task panel, a modal — are fixed to the window,
   // not to this layout, so the padding above does not reach them. They opt in
@@ -668,7 +684,7 @@ export function AppShell({ children }: { children: ReactNode }) {
      * `clip` crops the same overflow without creating a scrollport, so both
      * go back to sticking to the viewport.
      */
-    <div className={`flex min-h-screen overflow-x-clip transition-[padding] duration-200 ${docked ? 'xl:pr-[440px]' : ''}`}>
+    <div className={`flex min-h-screen overflow-x-clip transition-[padding] duration-200 ease-out ${docked ? 'sm:pr-[440px]' : ''}`}>
       {/* Sidebar — desktop */}
       <aside
         className={`relative z-40 hidden shrink-0 bg-nav transition-[width] duration-200 ease-out lg:block ${collapsed ? 'w-[68px]' : 'w-60'}`}

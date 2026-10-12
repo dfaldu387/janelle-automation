@@ -537,12 +537,23 @@ html.jenny-locked body {
 }
 
 
-/* Where the docked panel sits beside the page (xl and up — AppShell), a
+/* Where the docked panel sits beside the page (sm and up — AppShell), a
    full-screen overlay ends at its edge rather than running under it. */
-@media (min-width: 1280px) {
+@media (min-width: 640px) {
   html[data-assistant-docked='true'] .dock-aware {
     right: 440px;
   }
+}
+
+/* Jenny slides in from the right so the panel entrance matches the body
+   padding transition (200ms ease-out), keeping content and panel edge in sync
+   and eliminating the brief visible overlap during Jenny opening. */
+.assistant-drawer {
+  animation: jenny-slide-in 200ms ease-out;
+}
+@keyframes jenny-slide-in {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
 }
 
 /* A job that runs for minutes: the gear turns slowly rather than spinning
