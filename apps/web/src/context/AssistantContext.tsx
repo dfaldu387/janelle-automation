@@ -9,7 +9,8 @@ import {
   type Context,
   type ReactNode,
 } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { CHECKIN_PROMPT } from '@janelle/shared';
 import {
   AGENT_KEYS,
   ASSISTANT_NAME,
@@ -21,7 +22,15 @@ import {
 import { useAuth } from './AuthContext';
 import { api, apiStream, apiUpload, NetworkError } from '../lib/api';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useProject, type AssistantReply, type ProposedAction, type SavedProposal } from '../lib/queries';
+import {
+  useProject,
+  type AssistantReply,
+  type CheckinOutcome,
+  type CheckinTask,
+  type CheckinView,
+  type ProposedAction,
+  type SavedProposal,
+} from '../lib/queries';
 import {
   bestHearing,
   isUnheard,
@@ -78,8 +87,13 @@ export interface ChatMessage {
   done?: string[];
   /** Proposals the person turned down. */
   dismissed?: string[];
-  /** A briefing is her speaking first; an error is a failure with a retry. */
-  kind?: 'briefing' | 'error';
+  /**
+   * A briefing is her speaking first; an error is a failure with a retry; a
+   * check-in is the end-of-day list with a button per task.
+   */
+  kind?: 'briefing' | 'error' | 'checkin';
+  /** For a check-in: the tasks, and what the person has answered about each so far. */
+  checkin?: CheckinTask[];
   /**
    * The day's opening briefing, as opposed to the one every new conversation
    * starts with. Only this one names the conversation after itself — without
@@ -177,6 +191,12 @@ interface AssistantCtx {
   /** Say, in the conversation, that something the person confirmed is saved. */
   acknowledge: (saved: SavedProposal) => void;
 
+  /** Put the end-of-day check-in in the conversation now, whatever the hour. */
+  startCheckin: () => void;
+  checkinLoading: boolean;
+  /** Remember what the person answered about one task in a check-in message. */
+  setCheckinOutcome: (messageId: string, taskId: string, outcome: CheckinOutcome, note?: string | null) => void;
+
   briefingLoading: boolean;
   /** Things in a briefing nobody has opened yet — the launcher's badge. */
   unseen: number;
@@ -257,6 +277,8 @@ interface Stored {
   activeId: string;
   /** The local day the last briefing was made, so there is one a day. */
   briefedOn: string | null;
+  /** The local day the end-of-day check-in was last offered, so there is one a day. */
+  checkedInOn?: string | null;
   unseen: number;
   /** Named agent(s) switched on, narrowing Jenny to their tools. Empty = unrestricted. */
   agents: AgentKey[];
@@ -304,7 +326,7 @@ const allAgents = (): AgentKey[] => [...AGENT_KEYS];
 
 const emptyStore = (): Stored => {
   const first = blankConversation();
-  return { v: 3, conversations: [first], activeId: first.id, briefedOn: null, unseen: 0, agents: allAgents() };
+  return { v: 3, conversations: [first], activeId: first.id, briefedOn: null, checkedInOn: null, unseen: 0, agents: allAgents() };
 };
 
 /** The conversation on screen; there is always one. */
@@ -805,6 +827,94 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     void fetchBriefing(undefined, true);
   }, [userId, store.briefedOn, fetchBriefing]);
 
+  // ── The end-of-day check-in ───────────────────────────────
+
+  const [checkinLoading, setCheckinLoading] = useState(false);
+  const checkinInFlight = useRef(false);
+  const navigate = useNavigate();
+
+  /**
+   * The day's check-in, into the conversation: the 5pm email's list with a
+   * button per task. `force` is a person asking for it — the chip, the link
+   * in the evening email — and gets an answer even when there is nothing
+   * to check in about; the automatic one after four stays quiet instead.
+   */
+  const fetchCheckin = useCallback(
+    async (opts: { force?: boolean } = {}) => {
+      if (checkinInFlight.current) return;
+      checkinInFlight.current = true;
+      setCheckinLoading(true);
+      try {
+        const view = await api<CheckinView | null>(`/assistant/checkin?hour=${new Date().getHours()}`);
+        setStore((s) => ({ ...s, checkedInOn: localDay() }));
+        if (!view) {
+          if (opts.force) {
+            const lead = 'Nothing to check in about today — nothing of yours was due, and nothing is blocked. Have a good evening.';
+            append({ role: 'assistant', content: lead, answer: { lead, items: [], more: 0, speech: lead, sources: [], suggestions: [] } });
+          }
+          return;
+        }
+        const onPage = window.location.pathname.startsWith('/assistant');
+        update((s) => ({
+          ...s,
+          // Counted on the launcher like a briefing, when nobody is looking.
+          unseen: openRef.current || onPage ? s.unseen : s.unseen + 1,
+          messages: [
+            ...s.messages,
+            { id: newId(), at: Date.now(), role: 'assistant', kind: 'checkin', content: view.answer.lead, answer: view.answer, checkin: view.tasks },
+          ],
+        }));
+        if (opts.force && !onPage) setOpenState(true);
+      } catch (err) {
+        if (opts.force) append({ role: 'assistant', kind: 'error', content: (err as Error).message, retry: CHECKIN_PROMPT });
+      } finally {
+        checkinInFlight.current = false;
+        setCheckinLoading(false);
+      }
+    },
+    [append, update],
+  );
+
+  const startCheckin = useCallback(() => {
+    void fetchCheckin({ force: true });
+  }, [fetchCheckin]);
+
+  // Once a day from four in the afternoon, as soon as the app is open — and
+  // checked again every few minutes, for an app left open since the morning.
+  useEffect(() => {
+    if (!userId) return;
+    const tick = () => {
+      if (new Date().getHours() < 16 || store.checkedInOn === localDay()) return;
+      void fetchCheckin();
+    };
+    tick();
+    const timer = window.setInterval(tick, 5 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [userId, store.checkedInOn, fetchCheckin]);
+
+  // The evening email and Slack message link here: /assistant?checkin=1.
+  useEffect(() => {
+    if (!userId) return;
+    const params = new URLSearchParams(location.search);
+    if (params.get('checkin') !== '1') return;
+    params.delete('checkin');
+    navigate({ pathname: location.pathname, search: params.toString() ? `?${params}` : '' }, { replace: true });
+    void fetchCheckin({ force: true });
+  }, [userId, location.search, location.pathname, navigate, fetchCheckin]);
+
+  const setCheckinOutcome = useCallback(
+    (messageId: string, taskId: string, outcome: CheckinOutcome, note?: string | null) =>
+      update((s) => ({
+        ...s,
+        messages: s.messages.map((m) =>
+          m.id !== messageId || !m.checkin
+            ? m
+            : { ...m, checkin: m.checkin.map((t) => (t.id === taskId ? { ...t, outcome, outcomeNote: note ?? null } : t)) },
+        ),
+      })),
+    [update],
+  );
+
   // ── Asking ────────────────────────────────────────────────
 
   const listenRef = useRef<() => void>(() => {});
@@ -895,6 +1005,14 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       const typed = text.trim();
       const files = (opts.files ?? []).slice(0, 4);
       if ((!typed && !files.length) || abortRef.current) return;
+
+      // The one question answered here rather than by the model: the chip
+      // under the briefing, or the same words typed.
+      if (!files.length && typed.replace(/[.!?]+$/, '').toLowerCase() === CHECKIN_PROMPT.toLowerCase()) {
+        append({ role: 'user', content: typed });
+        void fetchCheckin({ force: true });
+        return;
+      }
       // A file on its own still asks something: look at it.
       const message =
         typed || (files.length === 1 ? `Take a look at ${files[0].name}.` : `Take a look at these ${files.length} files.`);
@@ -1024,7 +1142,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           deliver('Sorry, that did not work. Try asking again.');
         });
     },
-    [append, ask, deliver, path, update, queryClient],
+    [append, ask, deliver, path, update, queryClient, fetchCheckin],
   );
 
   const editMessage = useCallback(
@@ -1400,6 +1518,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       markDone,
       markDismissed,
       acknowledge,
+      startCheckin,
+      checkinLoading,
+      setCheckinOutcome,
       briefingLoading,
       unseen: store.unseen,
       open,
@@ -1427,6 +1548,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       active.messages, active.id, store.unseen, pending, status, send, imagine, editMessage, uploadFile, vocabulary, interim, stop, newConversation,
       conversations, openConversation, renameConversation, pinConversation, deleteConversation, downloadConversation,
       prefill, setPrefill, attachRequest, requestAttach, markDone, markDismissed, acknowledge,
+      startCheckin, checkinLoading, setCheckinOutcome,
       briefingLoading, open, setOpen, focusRequest, requestFocus, lookingAt, store.agents, setAgents, handsFree,
       setHandsFree, voice, skipSpeaking, doneTalking, speakReplies, micError, micLevel, micLive, canListen, canSpeak,
     ],

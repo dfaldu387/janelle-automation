@@ -1102,6 +1102,21 @@ function SlackSetupCard() {
                 </div>
               </div>
 
+              <div className="flex items-start gap-3 rounded-lg border border-line p-3">
+                <Switch
+                  checked={data.personalReminders}
+                  disabled={setConfig.isPending || !data.enabled}
+                  label="Message each person directly"
+                  onChange={(next) => setConfig.mutate({ personalReminders: next }, { onSuccess: () => say(`Direct messages turned ${next ? 'on' : 'off'}`) })}
+                />
+                <div className="min-w-0">
+                  <p className="text-[13px] font-medium leading-tight text-ink">Message each person directly</p>
+                  <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">
+                    Their top priorities at 9am and the end-of-day check-in at 5pm as a Slack DM, and the team summary to the owner — the same as the reminder emails. Needs the users:read.email and im:write permissions on the Slack app; someone with no Slack account at their email gets the email only.
+                  </p>
+                </div>
+              </div>
+
               <div>
                 <FieldLabel>Report channels</FieldLabel>
                 <div className="space-y-2">

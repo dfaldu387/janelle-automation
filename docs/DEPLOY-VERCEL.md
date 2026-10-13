@@ -103,17 +103,34 @@ finished tasks" (default hourly; Off skips it; last start in
 `settings.task_review_ran_at`). Only a task with mail it has not been checked
 against costs a Claude call. `?force=1` reviews every studio now.
 
-**`/api/ops/cron/midday-reminder`** emails the studio's midday task
-reminder: one message per teammate with open work, plus one to the owner
-breaking the whole studio down by person. Polled every 15 minutes, but only
-actually sends in the noon-Pacific hour, and only once per studio per day
-(last start in `settings.midday_reminder_ran_at`) — the wall-clock-hour gate
-is what keeps this at noon Pacific through the PST/PDT change without
-editing the schedule. Real sends, not drafts (see `sendMessage` in
-`services/gmail.ts`); every recipient is currently the studio's own
-`systems@` mailbox rather than the real person, while the content is being
-checked (`TEST_RECIPIENT` in `services/middayReminder.ts`). `?force=1` sends
-now regardless of the hour or the last send.
+**`/api/ops/cron/midday-reminder`** emails the studio's daily task
+reminders, twice a day. At 9am Pacific each teammate gets their **top
+priorities** — their open work due today or earlier, most overdue first,
+cut at five with a count of the rest, plus anything of theirs that is
+blocked. At 5pm each gets an **end-of-day check-in**: what they finished,
+what is still open and rolls to tomorrow, what is blocked, what is due
+tomorrow, and a question asking what is in the way. The owner gets a compact
+copy of each: one card per person with their counts and top three, never the
+full lists (caps in `PERSONAL_CAPS` / `OWNER_CAPS`,
+`services/middayReminder.ts`). With Slack connected and "Message each person
+directly" on in Settings, the same plans also go out as Slack DMs (owner
+included; `services/slackReminder.ts`; needs the `users:read.email` and
+`im:write` scopes on the bot). **Answers** to the check-in are read three
+ways and all land the same place (`services/checkin.ts`): a reply to the
+check-in email (the ingest recognises the subject and writes "done" /
+"blocked" / "tomorrow" onto the tasks the reply names, no model call, and
+never raises a task from it); the check-in in Jenny (`/assistant?checkin=1`,
+offered after 4pm local — a Done / Blocked / Tomorrow button per task,
+`GET`/`POST /api/assistant/checkin`); or marking the task Blocked on the
+board. A blocker's reason is kept as a `Blocked: …` comment on the task and
+shown under it in the next morning's plan; a reply that names no task is
+shown whole under the person's name. Polled every
+15 minutes, but only sends in the 9am and 5pm Pacific hours, and at most
+once per studio per slot (last start in `settings.midday_reminder_ran_at`)
+— the wall-clock-hour gate keeps the times through the PST/PDT change
+without editing the schedule. Real sends, not drafts (see `sendMessage` in
+`services/gmail.ts`). `?force=1` sends now regardless of the hour or the
+last send; `?slot=morning|evening` picks which email.
 
 **The Supabase schedules are only the fastest pace.** How often each job
 really runs for a studio is the admin's setting, read on every call, so a

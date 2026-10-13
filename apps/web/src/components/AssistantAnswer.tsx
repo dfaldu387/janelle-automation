@@ -881,29 +881,32 @@ function BriefingTile({ item }: { item: AssistantItem }) {
   return <Target item={item} className={cls}>{inner}</Target>;
 }
 
-export function BriefingAnswerView({ answer }: { answer: AssistantAnswer }) {
+export function BriefingAnswerView({ answer, wide = false }: { answer: AssistantAnswer; wide?: boolean }) {
   const followUps = answer.items.filter((i) => i.kind === 'follow_up');
   const tasks = answer.items.filter((i) => i.kind === 'task');
   const rest = answer.items.filter((i) => i.kind !== 'follow_up' && i.kind !== 'task');
+  // On the full page the briefing has the width of the screen: three tiles
+  // across, so a morning's work is seen in one look instead of a scroll.
+  const cols = wide ? 'grid-cols-1 sm:grid-cols-2 xl:grid-cols-3' : 'grid-cols-1 sm:grid-cols-2';
 
   return (
     <div className="space-y-4">
       <p className="text-[14px] leading-relaxed text-ink">{answer.lead}</p>
 
       {followUps.length > 0 && (
-        <div className={`grid gap-2.5 ${followUps.length === 1 ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+        <div className={`grid gap-2.5 ${followUps.length === 1 ? 'grid-cols-1' : cols}`}>
           {followUps.map((item, i) => <BriefingTile key={i} item={item} />)}
         </div>
       )}
 
       {tasks.length > 0 && (
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <div className={`grid gap-2.5 ${cols}`}>
           {tasks.map((item, i) => <BriefingTile key={i} item={item} />)}
         </div>
       )}
 
       {rest.length > 0 && (
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <div className={`grid gap-2.5 ${cols}`}>
           {rest.map((item, i) => <BriefingTile key={i} item={item} />)}
         </div>
       )}

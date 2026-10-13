@@ -1307,6 +1307,12 @@ export interface DashboardSummary {
  * general, so she needs a name people can ask for by name.
  */
 export const ASSISTANT_NAME = 'Jenny';
+/**
+ * The one question the browser answers itself rather than sending to the
+ * model: it opens the end-of-day check-in (GET /assistant/checkin). Offered
+ * as a chip under the briefing after four, and typed by anyone who knows it.
+ */
+export const CHECKIN_PROMPT = 'Do my end-of-day check-in';
 
 /**
  * The named personas a person can switch Jenny to — narrowing her to one

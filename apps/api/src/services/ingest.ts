@@ -20,6 +20,7 @@ import {
 import { loadStudioNames, type StudioNames } from '../lib/studioNames.js';
 import { STUDIO_MAILBOXES, STUDIO_TEAM, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
 import { createTaskFromEmail, mergeDuplicateTasks } from './tasks.js';
+import { isCheckinReply, recordCheckinReply } from './checkin.js';
 import { isAiReady, sweepStaleUploads } from './anthropic.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { bodyColumnsReady, bodyFields, readStoredText } from '../lib/emailStore.js';
@@ -761,6 +762,45 @@ async function ingestInternal(
             skippedCount++;
             continue;
           }
+        }
+
+        // A teammate answering the end-of-day check-in email. Their reply
+        // is about their own tasks — "done", "stuck on the vendor" — and
+        // reading it as new work raised a task from every answer. It is
+        // kept as an email and handed to the check-in (services/checkin.ts)
+        // to be written onto the tasks it names, with no Claude call.
+        if (isCheckinReply(email)) {
+          let replyRowId: string | null = null;
+          try {
+            const { data: replyRow } = await supabaseAdmin
+              .from('emails')
+              .insert({
+                org_id: orgId,
+                gmail_id: email.gmailId,
+                thread_id: email.threadId,
+                from_addr: email.from,
+                to_addr: email.to,
+                subject: email.subject,
+                snippet: email.snippet,
+                ...(await bodyFields((email.body || email.snippet || '').slice(0, MAX_BODY_CHARS), linksIn(email.body || ''), null)),
+                received_at: email.receivedAt,
+                ...(ownerColumn ? { owner_id: ownerId } : {}),
+                ...(messageColumn ? { message_id: email.messageIdHeader || null } : {}),
+                class: 'general',
+              })
+              .select('id')
+              .maybeSingle();
+            replyRowId = (replyRow as { id: string } | null)?.id ?? null;
+            emailCount++;
+          } catch (err) {
+            console.error('[ingest] check-in reply not stored:', (err as Error).message);
+          }
+          try {
+            await recordCheckinReply(orgId, email, replyRowId);
+          } catch (err) {
+            console.error('[ingest] check-in reply not recorded:', (err as Error).message);
+          }
+          continue;
         }
 
         const names = useAi ? await loadStudioNames(orgId) : null;

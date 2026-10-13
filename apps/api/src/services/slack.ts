@@ -45,7 +45,9 @@ export function describeSlackError(code: string): string {
     case 'is_archived':
       return 'That channel is archived.';
     case 'missing_scope':
-      return 'The Slack app is missing the chat:write permission. Add it under OAuth & Permissions and reinstall the app.';
+      return 'The Slack app is missing a permission (chat:write for channels; users:read.email and im:write for direct messages). Add it under OAuth & Permissions and reinstall the app.';
+    case 'users_not_found':
+      return 'Nobody in the Slack workspace has that email address.';
     case 'ratelimited':
       return 'Slack is rate-limiting the bot; the sync will resume on its next run.';
     case 'network_error':
@@ -194,6 +196,28 @@ export async function postMessage(
 
 export async function updateMessage(token: string, channel: string, ts: string, msg: SlackMessage): Promise<void> {
   await call(token, 'chat.update', { channel, ts, text: msg.text, blocks: msg.blocks });
+}
+
+/**
+ * The Slack account behind an email address, for a direct message. Needs
+ * the users:read.email scope. Null when nobody in the workspace has that
+ * address — a teammate on a personal Gmail, say — so the caller falls back
+ * to email rather than failing the whole send.
+ */
+export async function lookupUserByEmail(token: string, email: string): Promise<string | null> {
+  try {
+    const r = await call<{ user?: { id: string } }>(token, 'users.lookupByEmail', { email }, true);
+    return r.user?.id ?? null;
+  } catch (err) {
+    if (err instanceof SlackError && err.code === 'users_not_found') return null;
+    throw err;
+  }
+}
+
+/** The direct-message channel with one person, opened or found. Needs the im:write scope. */
+export async function openDm(token: string, userId: string): Promise<string> {
+  const r = await call<{ channel: { id: string } }>(token, 'conversations.open', { users: userId }, true);
+  return r.channel.id;
 }
 
 // ── What goes in the channel ────────────────────────────────

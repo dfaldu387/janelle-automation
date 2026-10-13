@@ -581,7 +581,7 @@ settingsRouter.put(
       }
       patch.channel = channel;
     }
-    for (const key of ['enabled', 'tasks', 'followUps', 'dailyDigest'] as const) {
+    for (const key of ['enabled', 'tasks', 'followUps', 'dailyDigest', 'personalReminders'] as const) {
       if (key in b) patch[key] = Boolean(b[key]);
     }
     // The three task-report channels. Blank switches that report off.
