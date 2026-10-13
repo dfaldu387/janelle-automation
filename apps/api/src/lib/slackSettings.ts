@@ -45,6 +45,13 @@ export interface SlackConfig {
   dailyDigest: boolean;
   /** The completed / pending / overdue task reports, three times a day. */
   reportChannels: ReportChannels;
+  /**
+   * Each person's morning priorities and end-of-day check-in as a direct
+   * message, and the team summary to the owner — the same as the reminder
+   * emails, for the people who live in Slack. Needs users:read.email and
+   * im:write on the bot.
+   */
+  personalReminders: boolean;
 }
 
 export interface SlackSyncState {
@@ -75,6 +82,7 @@ export interface SlackSettingsView {
   followUps: boolean;
   dailyDigest: boolean;
   reportChannels: ReportChannels;
+  personalReminders: boolean;
   lastRunAt: string | null;
   lastPosted: number;
   lastError: string | null;
@@ -84,7 +92,7 @@ const NO_REPORT_CHANNELS: ReportChannels = { completed: '', pending: '', overdue
 
 const DEFAULTS: SlackConfig = {
   channel: '', enabled: true, enabledAt: null, tasks: true, followUps: true, dailyDigest: true,
-  reportChannels: NO_REPORT_CHANNELS,
+  reportChannels: NO_REPORT_CHANNELS, personalReminders: true,
 };
 
 const cleanChannel = (c: string) => c.trim().replace(/^#/, '');
@@ -118,6 +126,7 @@ function readConfig(settings: Record<string, unknown>): SlackConfig {
     followUps: raw.followUps !== false,
     dailyDigest: raw.dailyDigest !== false,
     reportChannels: readReportChannels(raw.reportChannels),
+    personalReminders: raw.personalReminders !== false,
   };
 }
 
@@ -217,6 +226,7 @@ export async function slackSettingsView(orgId: string): Promise<SlackSettingsVie
     followUps: resolved.config.followUps,
     dailyDigest: resolved.config.dailyDigest,
     reportChannels: resolved.config.reportChannels,
+    personalReminders: resolved.config.personalReminders,
     lastRunAt: sync.lastRunAt ?? null,
     lastPosted: sync.lastPosted ?? 0,
     lastError: sync.lastError ?? null,

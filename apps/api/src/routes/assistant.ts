@@ -6,6 +6,8 @@ import { asyncHandler } from '../middleware/error.js';
 import { ask, type AssistantContext, type AssistantTurn, type PendingProposal } from '../services/assistant.js';
 import { ProposalError, commitProposal } from '../services/proposals.js';
 import { buildBriefing, emptyBriefing } from '../services/briefing.js';
+import { CheckinError, buildCheckin, recordCheckin, type CheckinOutcome } from '../services/checkin.js';
+import { canManageTasks, canWith } from '@janelle/shared';
 import { MAX_RELAY_BYTES, UPLOAD_GRANT_TTL_MS, openFileGrant, sealFileGrant } from '../lib/fileTokens.js';
 import { MAX_UPLOAD_BYTES, removeUploads, sniffType, storeUpload } from '../lib/uploads.js';
 import { FileFetchError, fetchGrantedContent, fetchGrantedFile } from '../services/files.js';
@@ -215,6 +217,54 @@ assistantRouter.get(
     const hour = Number.isInteger(hourRaw) && hourRaw >= 0 && hourRaw <= 23 ? hourRaw : null;
     if (!ctx.orgId) return res.json({ data: emptyBriefing(ctx.name, hour) });
     res.json({ data: await buildBriefing(ctx, { hour }) });
+  }),
+);
+
+/**
+ * The end-of-day check-in: this person's day as the 5pm email tells it,
+ * with each task ready to be answered. Null when there is nothing to say.
+ * Built straight from the database, like the briefing — no model call.
+ */
+assistantRouter.get(
+  '/checkin',
+  asyncHandler(async (req, res) => {
+    const ctx = await assistantContext(req);
+    const hourRaw = Number(req.query.hour);
+    const hour = Number.isInteger(hourRaw) && hourRaw >= 0 && hourRaw <= 23 ? hourRaw : null;
+    if (!ctx.orgId) return res.json({ data: null });
+    res.json({ data: await buildCheckin({ db: ctx.db, userId: ctx.userId, orgId: ctx.orgId, name: ctx.name }, { hour }) });
+  }),
+);
+
+/**
+ * One answer in the check-in: Done, Blocked (and why), or Tomorrow. The
+ * same rules as the Tasks board — your own queue is yours; anyone else's is
+ * for whoever runs the board.
+ */
+assistantRouter.post(
+  '/checkin',
+  asyncHandler(async (req, res) => {
+    const { db, orgId, userId, role, seat, permissions } = req.auth!;
+    if (!orgId) return res.status(400).json({ error: 'No studio is attached to this account.' });
+    if (!canWith(permissions, role, 'tasks', 'update')) return res.status(403).json({ error: 'Your role cannot change tasks.' });
+
+    const b = req.body ?? {};
+    const taskId = typeof b.task_id === 'string' ? b.task_id.slice(0, 64) : '';
+    const outcome = ['done', 'blocked', 'tomorrow'].includes(b.outcome) ? (b.outcome as CheckinOutcome) : null;
+    if (!taskId || !outcome) return res.status(400).json({ error: 'A task and an answer (done, blocked or tomorrow) are needed.' });
+    const note = typeof b.note === 'string' ? b.note.slice(0, 500) : null;
+
+    try {
+      const saved = await recordCheckin(
+        { db, orgId, userId, manages: canManageTasks(role, seat ?? null) },
+        { taskId, outcome, note },
+        'jenny',
+      );
+      res.json({ data: saved });
+    } catch (err) {
+      if (err instanceof CheckinError) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
   }),
 );
 

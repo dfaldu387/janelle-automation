@@ -595,6 +595,51 @@ export interface AssistantTurn {
   content: string;
 }
 
+// ── The end-of-day check-in ─────────────────────────────────
+
+export type CheckinOutcome = 'done' | 'blocked' | 'tomorrow';
+
+export interface CheckinTask {
+  id: string;
+  title: string;
+  project: string | null;
+  due: string | null;
+  status: string;
+  bucket: 'open' | 'blocked' | 'done' | 'tomorrow';
+  /** The last "Blocked: …" note, for a task that already is. */
+  note: string | null;
+  /** What the person answered in this check-in, kept with the message. */
+  outcome?: CheckinOutcome | null;
+  outcomeNote?: string | null;
+}
+
+export interface CheckinView {
+  answer: AssistantAnswer;
+  tasks: CheckinTask[];
+}
+
+export interface CheckinSaved {
+  id: string;
+  title: string;
+  outcome: CheckinOutcome;
+  status: string;
+  due_date: string | null;
+}
+
+/** One answer in the check-in: Done, Blocked (and why) or Tomorrow. */
+export function useRecordCheckin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { task_id: string; outcome: CheckinOutcome; note?: string | null }) =>
+      api<CheckinSaved>('/assistant/checkin', { method: 'POST', body: JSON.stringify(v) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['task'] });
+      qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+}
+
 /** Commit a proposal the person confirmed. Separate from asking, on purpose. */
 export function useConfirmAction() {
   const qc = useQueryClient();
@@ -1808,6 +1853,8 @@ export interface SlackConfig {
   dailyDigest: boolean;
   /** Channels for the completed / pending / overdue task reports; '' = not sent. */
   reportChannels: SlackReportChannels;
+  /** Each person's 9am priorities and 5pm check-in as a DM, and the team summary to the owner. */
+  personalReminders: boolean;
   lastRunAt: string | null;
   lastPosted: number;
   lastError: string | null;
@@ -1849,7 +1896,7 @@ export function useClearSlackToken() {
 }
 
 export function useSetSlackConfig() {
-  return useSlackMutation((v: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean; reportChannels?: Partial<SlackReportChannels> }) =>
+  return useSlackMutation((v: { channel?: string; enabled?: boolean; tasks?: boolean; followUps?: boolean; dailyDigest?: boolean; personalReminders?: boolean; reportChannels?: Partial<SlackReportChannels> }) =>
     api<SlackConfig>('/settings/slack/config', { method: 'PUT', body: JSON.stringify(v) }),
   );
 }

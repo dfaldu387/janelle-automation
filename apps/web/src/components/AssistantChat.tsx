@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ASSISTANT_NAME } from '@janelle/shared';
 import { useAssistant, type AttachedFile, type ChatMessage } from '../context/AssistantContext';
 import { api } from '../lib/api';
-import { useConfirmAction } from '../lib/queries';
+import { useConfirmAction, useRecordCheckin, type CheckinOutcome, type CheckinTask } from '../lib/queries';
 import { bestHearing, listen, speak, type MicLevel, type StopListening } from '../lib/speech';
 import { AssistantAnswerView, BriefingAnswerView, AttachedFiles, answerIsPictures, answerIsWide, sizeLabel } from './AssistantAnswer';
 import { useImagineOptions } from '../lib/queries';
@@ -39,16 +39,34 @@ const IconX = (p: IconProps) => <svg {...stroke} {...p}><path d="M18 6 6 18M6 6l
 const IconRetry = (p: IconProps) => (
   <svg {...stroke} {...p}><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></svg>
 );
-const IconActivity = (p: IconProps) => (
-  <svg {...stroke} {...p}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>
+const IconSparkle = (p: IconProps) => (
+  <svg {...stroke} {...p}>
+    <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" />
+    <path d="M12 8.5 13.3 11.2 16 12l-2.7 1.3L12 16l-1.3-2.7L8 12l2.7-.8z" />
+  </svg>
+);
+const IconSearch = (p: IconProps) => (
+  <svg {...stroke} {...p}><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+);
+const IconClock = (p: IconProps) => (
+  <svg {...stroke} {...p}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+);
+const IconTrend = (p: IconProps) => (
+  <svg {...stroke} {...p}><path d="M3 17 9 11l4 4 8-8" /><path d="M15 7h6v6" /></svg>
+);
+const IconEvidence = (p: IconProps) => (
+  <svg {...stroke} {...p}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><circle cx="11.5" cy="14.5" r="2.5" /><path d="m13.5 16.5 2 2" /></svg>
 );
 
-const QUICK_SUGGESTIONS = [
-  'What tasks are overdue right now?',
-  'Which projects have the most open tasks?',
-  'What activity happened in the last 24 hours?',
-  'Show me pending vendor follow-ups',
-  'What did the team work on this week?',
+/**
+ * The questions offered on an empty conversation, each as a card: what kind
+ * of question it is, and the question itself, sent as written when pressed.
+ */
+const QUICK_CARDS: { label: string; question: string; icon: (p: IconProps) => JSX.Element }[] = [
+  { label: 'What is late', question: 'What tasks are overdue right now?', icon: IconSearch },
+  { label: 'This week', question: 'What did the team work on this week?', icon: IconClock },
+  { label: 'Across projects', question: 'Which projects have the most open tasks?', icon: IconTrend },
+  { label: 'Chase vendors', question: 'Show me pending vendor follow-ups', icon: IconEvidence },
 ];
 
 
@@ -186,6 +204,164 @@ function Proposals({ message }: { message: ChatMessage }) {
         );
       })}
       {confirm.isError && <p className="text-[12.5px] text-crit">{(confirm.error as Error).message}</p>}
+    </div>
+  );
+}
+
+const shortDay = (iso: string) =>
+  new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+
+const OUTCOME_LABEL: Record<CheckinOutcome, string> = { done: 'Done', blocked: 'Blocked', tomorrow: 'Rolls to tomorrow' };
+
+/**
+ * The end-of-day check-in: the day's tasks, each with a button per answer.
+ *
+ * An answer is saved the moment it is pressed (POST /assistant/checkin) —
+ * the task's status, a note with the reason, a line in the log — and kept
+ * on the message, so a reopened conversation still shows what was said.
+ * "Blocked" asks why before saving: the reason is what tomorrow's plan,
+ * and the owner, need to see.
+ */
+function CheckinAnswerView({ message }: { message: ChatMessage }) {
+  const { setCheckinOutcome } = useAssistant();
+  const record = useRecordCheckin();
+  const [asking, setAsking] = useState<string | null>(null);
+  const [why, setWhy] = useState('');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const tasks = message.checkin ?? [];
+
+  const answer = (t: CheckinTask, outcome: CheckinOutcome, note?: string) => {
+    setBusy(t.id);
+    setError(null);
+    record.mutate(
+      { task_id: t.id, outcome, note: note?.trim() || null },
+      {
+        onSuccess: () => {
+          setCheckinOutcome(message.id, t.id, outcome, note?.trim() || null);
+          setAsking(null);
+          setWhy('');
+        },
+        onError: (e) => setError((e as Error).message),
+        onSettled: () => setBusy(null),
+      },
+    );
+  };
+
+  const groups: { key: CheckinTask['bucket']; label: string; hint?: string }[] = [
+    { key: 'open', label: 'Still open', hint: 'Done, blocked, or does it roll to tomorrow?' },
+    { key: 'blocked', label: 'Blocked', hint: 'Still stuck? Say what is in the way.' },
+    { key: 'tomorrow', label: 'Due tomorrow' },
+    { key: 'done', label: 'Finished today' },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <p className="text-[14px] leading-relaxed text-ink">{message.answer?.lead ?? message.content}</p>
+      {groups.map((g) => {
+        const rows = tasks.filter((t) => t.bucket === g.key);
+        if (!rows.length) return null;
+        return (
+          <div key={g.key}>
+            <div className="mb-1.5 flex items-baseline gap-2">
+              <span className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-ink-faint">
+                {g.label} <span className="font-medium">({rows.length})</span>
+              </span>
+              {g.hint && <span className="text-[11.5px] text-ink-faint">{g.hint}</span>}
+            </div>
+            <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
+              {rows.map((t) => {
+                const meta = [t.project, t.due ? `due ${shortDay(t.due)}` : null].filter(Boolean).join(' · ');
+                const settled = t.outcome ?? null;
+                const open = asking === t.id;
+                return (
+                  <li key={t.id} className="px-3.5 py-2.5">
+                    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1.5">
+                      <div className="min-w-0 flex-1">
+                        <Link to={`/tasks?task=${t.id}`} className={`focusable text-[13.5px] font-semibold leading-snug text-ink hover:underline ${settled === 'done' || g.key === 'done' ? 'line-through text-ink-soft' : ''}`}>
+                          {t.title}
+                        </Link>
+                        {meta && <p className="text-[12px] text-ink-soft">{meta}</p>}
+                        {t.note && !settled && (
+                          <p className="mt-1 border-l-2 border-crit/60 pl-2 text-[12px] text-ink-soft">{t.note}</p>
+                        )}
+                        {settled && t.outcomeNote && (
+                          <p className="mt-1 border-l-2 border-brass/60 pl-2 text-[12px] text-ink-soft">{t.outcomeNote}</p>
+                        )}
+                      </div>
+                      {g.key === 'done' ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-good/10 px-2 py-0.5 text-[11.5px] font-semibold text-good">
+                          <IconCheck width={12} height={12} /> Done
+                        </span>
+                      ) : settled ? (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${
+                            settled === 'done' ? 'bg-good/10 text-good' : settled === 'blocked' ? 'bg-crit/10 text-crit' : 'bg-sunk text-ink-soft'
+                          }`}
+                        >
+                          {settled === 'done' && <IconCheck width={12} height={12} />}
+                          {OUTCOME_LABEL[settled]}
+                        </span>
+                      ) : (
+                        <div className="flex shrink-0 flex-wrap gap-1.5">
+                          <button type="button" className="btn-secondary btn-sm" disabled={busy === t.id} onClick={() => answer(t, 'done')}>
+                            Done
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn-secondary btn-sm ${open ? 'border-crit/50 text-crit' : ''}`}
+                            disabled={busy === t.id}
+                            onClick={() => {
+                              setAsking(open ? null : t.id);
+                              setWhy('');
+                            }}
+                          >
+                            {g.key === 'blocked' ? 'Still blocked' : 'Blocked'}
+                          </button>
+                          <button type="button" className="btn-ghost btn-sm" disabled={busy === t.id} onClick={() => answer(t, 'tomorrow')}>
+                            Tomorrow
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {open && !settled && (
+                      <form
+                        className="mt-2 flex flex-wrap items-end gap-2"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          answer(t, 'blocked', why);
+                        }}
+                      >
+                        <textarea
+                          autoFocus
+                          rows={2}
+                          value={why}
+                          onChange={(e) => setWhy(e.target.value)}
+                          placeholder="What is in the way? Who are you waiting on?"
+                          className="input min-w-0 flex-1 resize-none text-[13px]"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              answer(t, 'blocked', why);
+                            }
+                          }}
+                        />
+                        <button type="submit" className="btn-primary btn-sm" disabled={busy === t.id}>
+                          {busy === t.id ? 'Saving…' : 'Save'}
+                        </button>
+                      </form>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
+      {error && <p className="text-[12.5px] text-crit">{error}</p>}
+      {tasks.some((t) => t.bucket !== 'done' && !t.outcome) && (
+        <p className="text-[12.5px] text-ink-faint">Anything not answered stays as it is. Something else in your way? Just say so here.</p>
+      )}
     </div>
   );
 }
@@ -421,7 +597,8 @@ function MessageView({ message, compact, app = false }: { message: ChatMessage; 
   }
 
   const briefing = message.kind === 'briefing';
-  const width = compact || answerIsWide(message.answer)
+  const checkin = message.kind === 'checkin';
+  const width = compact || checkin || answerIsWide(message.answer)
     ? 'w-full'
     : answerIsPictures(message.answer)
       ? 'w-full max-w-[38rem]'
@@ -438,16 +615,21 @@ function MessageView({ message, compact, app = false }: { message: ChatMessage; 
             app
               ? 'text-[15px] leading-relaxed text-ink'
               : `rounded-2xl rounded-tl-md px-4 py-3 text-[14px] leading-relaxed text-ink ${
-                  briefing ? 'border border-brass/25 bg-brass/[0.06]' : 'bg-sunk'
+                  briefing || checkin ? 'border border-brass/25 bg-brass/[0.06]' : 'bg-sunk'
                 }`
           }
         >
           {briefing && (
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-brass-deep">Your briefing</div>
           )}
-          {message.answer ? (
+          {checkin && (
+            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-brass-deep">End-of-day check-in</div>
+          )}
+          {checkin ? (
+            <CheckinAnswerView message={message} />
+          ) : message.answer ? (
             briefing
-              ? <BriefingAnswerView answer={message.answer} />
+              ? <BriefingAnswerView answer={message.answer} wide={!compact && !app} />
               : <AssistantAnswerView answer={message.answer} compact={compact} />
           ) : (
             <p className="whitespace-pre-line">{message.content}</p>
@@ -562,118 +744,23 @@ const readableType = (f: File) =>
 
 type ComposeMode = 'ask' | 'image';
 
-const IconChevron = (p: IconProps) => <svg {...stroke} {...p}><path d="m6 9 6 6 6-6" /></svg>;
 const IconChat = (p: IconProps) => (
   <svg {...stroke} {...p}><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z" /></svg>
 );
 const IconImage = (p: IconProps) => (
   <svg {...stroke} {...p}><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="1.5" /><path d="m21 16-5-5-9 9" /></svg>
 );
-const MODE_ICON: Record<ComposeMode, (p: IconProps) => JSX.Element> = { ask: IconChat, image: IconImage };
-
-interface ModeOption {
-  key: ComposeMode;
-  label: string;
-  /** What this does, said once in the menu rather than on a line of its own under the box. */
-  hint: string;
-  enabled: boolean;
-  /** Why it is greyed out, when it is. */
-  unavailable?: string;
-}
-
-/**
- * Ask or Image — one control in the box, not buttons over it.
- *
- * The choices sat in a bar of their own above the composer, a whole row spent
- * on a choice most messages never change. As a menu it takes the width of a
- * word; what each mode does and costs is said inside it, where the choice
- * is made. It opens upward because the box is at the bottom of the screen.
- */
-function ModeMenu({ mode, options, onChange }: { mode: ComposeMode; options: ModeOption[]; onChange: (m: ComposeMode) => void }) {
-  const [open, setOpen] = useState(false);
-  const box = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const outside = (e: MouseEvent) => {
-      if (!box.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const escape = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      setOpen(false);
-      trigger.current?.focus();
-    };
-    document.addEventListener('mousedown', outside);
-    document.addEventListener('keydown', escape);
-    return () => {
-      document.removeEventListener('mousedown', outside);
-      document.removeEventListener('keydown', escape);
-    };
-  }, [open]);
-
-  const current = options.find((o) => o.key === mode) ?? options[0];
-  const Icon = MODE_ICON[current.key];
-
-  return (
-    <div ref={box} className="relative shrink-0">
-      <button
-        ref={trigger}
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={`Mode: ${current.label}. Change what this message does`}
-        title="Ask, or make an image"
-        className={`focusable flex h-9 items-center gap-1 rounded-lg px-2 text-[12.5px] font-medium transition-colors ${
-          mode === 'ask' ? 'text-ink-soft hover:bg-sunk hover:text-ink' : 'bg-brass/10 text-brass-deep hover:bg-brass/15'
-        }`}
-      >
-        <Icon width={16} height={16} />
-        {/* Narrow composers have no room for the word. The icon carries it,
-            and Image mode also tints the whole control, so which one is on
-            is still legible without it. */}
-        <span className="hidden sm:inline">{current.label}</span>
-        <IconChevron width={13} height={13} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
-      </button>
-      {open && (
-        <div
-          role="menu"
-          aria-label="What this message does"
-          className="absolute bottom-full left-0 z-30 mb-1.5 w-64 overflow-hidden rounded-xl border border-line bg-surface py-1 shadow-pop"
-        >
-          {options.map((o) => {
-            const ItemIcon = MODE_ICON[o.key];
-            const chosen = o.key === mode;
-            return (
-              <button
-                key={o.key}
-                type="button"
-                role="menuitemradio"
-                aria-checked={chosen}
-                disabled={!o.enabled}
-                onClick={() => {
-                  onChange(o.key);
-                  setOpen(false);
-                }}
-                className="flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors hover:bg-sunk disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent"
-              >
-                <ItemIcon width={16} height={16} className={`mt-0.5 shrink-0 ${chosen ? 'text-brass-deep' : 'text-ink-soft'}`} />
-                <span className="min-w-0 flex-1">
-                  <span className="block text-[13px] font-medium text-ink">{o.label}</span>
-                  <span className="block text-[11.5px] leading-snug text-ink-faint">{o.enabled ? o.hint : o.unavailable}</span>
-                </span>
-                {chosen && <IconCheck width={15} height={15} className="mt-0.5 shrink-0 text-brass-deep" />}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: boolean; dropInto: React.MutableRefObject<((files: File[]) => void) | null> }) {
+function Composer({
+  compact,
+  app = false,
+  page = false,
+  dropInto,
+}: {
+  compact: boolean;
+  app?: boolean;
+  page?: boolean;
+  dropInto: React.MutableRefObject<((files: File[]) => void) | null>;
+}) {
   const {
     send, imagine, pending, stop, canListen, lookingAt, focusRequest, setMicError, vocabulary, uploadFile, prefill, attachRequest,
     newConversation, messages, handsFree, setHandsFree,
@@ -891,7 +978,13 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
   }
 
   return (
-    <div className="border-t border-line px-4 pb-4 pt-3" data-attach-menu>
+    <div
+      className={`px-4 pt-3 ${compact ? 'border-t border-line pb-3' : 'pb-2.5'} ${
+        page ? 'sticky bottom-0 z-10 bg-paper pb-4' : ''
+      }`}
+      data-attach-menu
+    >
+    <div className={compact || app ? '' : 'mx-auto w-full max-w-6xl'}>
       {/* A live meter while listening. It answers the question the old
           "Listening…" placeholder could not: is it hearing ME? A voice too
           quiet to transcribe is told so while there is still time to move
@@ -971,16 +1064,16 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
           {`${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`}
         </p>
       )}
-      <div className="flex items-end gap-2">
+      <div className="flex items-center gap-2">
       <form
         onSubmit={(e) => {
           e.preventDefault();
           submit();
         }}
-        className={`flex flex-1 gap-1.5 border border-line bg-surface transition-colors focus-within:border-brass ${
+        className={`flex flex-1 gap-1 border border-line bg-surface shadow-card transition-[border-color,box-shadow] focus-within:border-brass focus-within:shadow-pop ${
           app
-            ? 'flex-wrap items-center rounded-3xl px-2.5 py-2 shadow-pop'
-            : 'items-end rounded-xl px-2 py-1.5'
+            ? 'flex-wrap items-center rounded-3xl px-2.5 py-2'
+            : 'items-end rounded-[26px] py-1.5 pl-2 pr-1.5'
         }`}
       >
         {/* File inputs: main (desktop + Files option), camera, photos */}
@@ -988,102 +1081,94 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
         <input ref={cameraRef} type="file" accept="image/*" capture="environment" hidden onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
         <input ref={photosRef} type="file" accept="image/*" multiple hidden onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = ''; }} />
 
-        {/* Mobile: + opens Camera / Photos / Files popup */}
-        <div className="relative shrink-0 sm:hidden" data-attach-menu>
+        {/*
+          * One quiet "+" for everything that is not typing: attach a file (or
+          * on a phone, the camera and photos), switch to making an image, or
+          * start a new conversation. The box itself stays a field, a mic and
+          * a send button, so the first thing on the screen is the question.
+          */}
+        <div className="relative shrink-0" data-attach-menu>
           <button
             type="button"
             onClick={() => setAttachMenu((v) => !v)}
-            disabled={attachments.length >= MAX_FILES}
-            aria-label="Attach"
+            aria-label="Attach a file, make an image, or start a new conversation"
+            aria-haspopup="menu"
             aria-expanded={attachMenu}
-            className="focusable grid h-9 w-9 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40"
+            title="Attach, make an image, or start over"
+            className={`focusable grid h-9 w-9 place-items-center rounded-full transition-colors ${
+              attachMenu ? 'bg-sunk text-ink' : 'text-ink-faint hover:bg-sunk hover:text-ink'
+            }`}
           >
-            <IconPlus width={18} height={18} />
+            <IconPlus width={18} height={18} className={`transition-transform ${attachMenu ? 'rotate-45' : ''}`} />
           </button>
           {attachMenu && (
-            <div className="absolute bottom-full left-0 z-50 mb-2 w-44 overflow-hidden rounded-2xl border border-line bg-surface shadow-pop">
+            <div role="menu" className="absolute bottom-full left-0 z-50 mb-2 w-56 overflow-hidden rounded-2xl border border-line bg-surface py-1 shadow-pop">
               {[
-                { label: 'Camera', ref: cameraRef, icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg> },
-                { label: 'Photos', ref: photosRef, icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg> },
-                { label: 'Files', ref: picker, icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> },
-              ].map(({ label, ref: inputRef, icon }) => (
+                { label: 'Attach a file', hint: 'PDF, image, spreadsheet, document', ref: picker, always: true, icon: <IconClip width={17} height={17} /> },
+                { label: 'Camera', hint: null, ref: cameraRef, always: false, icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg> },
+                { label: 'Photos', hint: null, ref: photosRef, always: false, icon: <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg> },
+              ].map(({ label, hint, ref: inputRef, always, icon }) => (
                 <button
                   key={label}
                   type="button"
+                  role="menuitem"
+                  disabled={attachments.length >= MAX_FILES}
                   onClick={() => { inputRef.current?.click(); setAttachMenu(false); }}
-                  className="focusable flex w-full items-center gap-3 px-4 py-3 text-left text-[14px] text-ink transition-colors hover:bg-sunk"
+                  className={`focusable w-full items-center gap-3 px-3.5 py-2.5 text-left text-[13.5px] text-ink transition-colors hover:bg-sunk disabled:opacity-40 ${always ? 'flex' : 'flex sm:hidden'}`}
                 >
                   <span className="text-ink-soft">{icon}</span>
-                  {label}
+                  <span className="min-w-0">
+                    <span className="block">{label}</span>
+                    {hint && <span className="block text-[11.5px] text-ink-faint">{hint}</span>}
+                  </span>
                 </button>
               ))}
+              {canMake && canMake.image.ready && (
+                <button
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={mode === 'image'}
+                  onClick={() => { setMode(mode === 'image' ? 'ask' : 'image'); setAttachMenu(false); ref.current?.focus(); }}
+                  className="focusable flex w-full items-center gap-3 border-t border-line px-3.5 py-2.5 text-left text-[13.5px] text-ink transition-colors hover:bg-sunk"
+                >
+                  <span className={mode === 'image' ? 'text-brass-deep' : 'text-ink-soft'}><IconImage width={17} height={17} /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block">{mode === 'image' ? 'Back to asking' : 'Make an image'}</span>
+                    <span className="block text-[11.5px] text-ink-faint">
+                      {mode === 'image'
+                        ? `${ASSISTANT_NAME} answers from the studio's records, mail and Drive`
+                        : `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`}
+                    </span>
+                  </span>
+                  {mode === 'image' && <IconCheck width={15} height={15} className="shrink-0 text-brass-deep" />}
+                </button>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                disabled={messages.length === 0 || pending}
+                onClick={() => { newConversation(); setText(''); setAttachments([]); setAttachMenu(false); ref.current?.focus(); }}
+                className="focusable flex w-full items-center gap-3 border-t border-line px-3.5 py-2.5 text-left text-[13.5px] text-ink transition-colors hover:bg-sunk disabled:opacity-40"
+              >
+                <span className="text-ink-soft"><IconChat width={17} height={17} /></span>
+                <span className="min-w-0">
+                  <span className="block">New conversation</span>
+                  {messages.length === 0 && <span className="block text-[11.5px] text-ink-faint">This one has not started yet</span>}
+                </span>
+              </button>
             </div>
           )}
         </div>
-
-        {/* Mobile: Talk hands-free toggle */}
-        {canListen && (
+        {mode === 'image' && (
           <button
             type="button"
-            onClick={() => setHandsFree(!handsFree)}
-            aria-pressed={handsFree}
-            aria-label={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
-            title={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
-            className={`focusable grid h-9 w-9 shrink-0 place-items-center rounded-lg transition-colors sm:hidden ${
-              handsFree ? 'bg-brass/15 text-brass-deep' : 'text-ink-soft hover:bg-sunk hover:text-ink'
-            }`}
+            onClick={() => { setMode('ask'); ref.current?.focus(); }}
+            title="Making an image — press to go back to asking"
+            className="focusable mb-1 flex h-7 shrink-0 items-center gap-1 rounded-full bg-brass/10 px-2 text-[12px] font-medium text-brass-deep hover:bg-brass/15"
           >
-            <IconTalk width={17} height={17} />
-          </button>
-        )}
-
-        {/* Desktop: New conversation button */}
-        <button
-          type="button"
-          onClick={() => { newConversation(); setText(''); setAttachments([]); ref.current?.focus(); }}
-          disabled={messages.length === 0 || pending}
-          aria-label="Start a new conversation"
-          title={messages.length === 0 ? 'This conversation has not started yet' : 'Start a new conversation'}
-          className="focusable hidden h-9 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[12.5px] font-medium text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40 sm:flex"
-        >
-          <IconPlus width={16} height={16} />
-          {!compact && <span>New</span>}
-        </button>
-        {canMake && canMake.image.ready && (
-          <div className="shrink-0">
-            <ModeMenu
-              mode={mode}
-              onChange={(next) => { setMode(next); ref.current?.focus(); }}
-              options={[
-                { key: 'ask', label: 'Ask', hint: `${ASSISTANT_NAME} answers from the studio's records, mail and Drive`, enabled: true },
-                { key: 'image', label: 'Image', hint: `${attachments.length > 0 ? 'Transforms what you attached' : 'Drawn from your words'} · no tokens spent`, enabled: canMake.image.ready, unavailable: 'Needs an image key in Settings' },
-              ]}
-            />
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={() => picker.current?.click()}
-          disabled={attachments.length >= MAX_FILES}
-          aria-label="Attach a PDF or an image"
-          title="Attach a PDF or an image"
-          className="focusable hidden h-9 w-9 shrink-0 place-items-center rounded-lg text-ink-soft transition-colors hover:bg-sunk hover:text-ink disabled:opacity-40 sm:grid"
-        >
-          <IconClip width={17} height={17} />
-        </button>
-        {canListen && (
-          <button
-            type="button"
-            onClick={toggleMic}
-            aria-label={listening ? 'Stop listening' : 'Ask by voice'}
-            aria-pressed={listening}
-            title={listening ? 'Stop listening' : 'Ask by voice'}
-            className={`focusable relative grid h-9 w-9 shrink-0 place-items-center rounded-lg transition-colors ${
-              listening ? 'bg-crit/10 text-crit' : 'text-ink-soft hover:bg-sunk hover:text-ink'
-            }`}
-          >
-            {listening ? <IconStop /> : <IconMic />}
-            {listening && <span className="absolute inset-0 animate-ping rounded-lg bg-crit/20" aria-hidden="true" />}
+            <IconImage width={13} height={13} />
+            Image
+            <IconX width={12} height={12} />
           </button>
         )}
         <textarea
@@ -1122,6 +1207,21 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
             app ? 'order-first w-full basis-full' : 'flex-1'
           }`}
         />
+        {canListen && (
+          <button
+            type="button"
+            onClick={toggleMic}
+            aria-label={listening ? 'Stop listening' : 'Ask by voice'}
+            aria-pressed={listening}
+            title={listening ? 'Stop listening' : 'Ask by voice'}
+            className={`focusable relative grid h-9 w-9 shrink-0 place-items-center rounded-full border transition-colors ${
+              listening ? 'border-crit/40 bg-crit/10 text-crit' : 'border-line text-ink-soft hover:bg-sunk hover:text-ink'
+            } ${app ? 'order-last' : ''}`}
+          >
+            {listening ? <IconStop /> : <IconMic />}
+            {listening && <span className="absolute inset-0 animate-ping rounded-full bg-crit/20" aria-hidden="true" />}
+          </button>
+        )}
         {pending ? (
           <button
             type="button"
@@ -1155,12 +1255,14 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
           aria-pressed={handsFree}
           aria-label={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
           title={handsFree ? 'End hands-free conversation' : 'Talk hands-free'}
-          className={`focusable hidden h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[12.5px] font-medium transition-colors sm:flex ${
-            handsFree ? 'bg-brass/15 text-brass-deep' : 'text-ink-soft hover:bg-sunk hover:text-ink'
+          className={`focusable flex shrink-0 items-center justify-center rounded-full border transition-colors ${
+            compact ? 'h-9 gap-1.5 px-2.5 text-[12.5px] font-medium' : 'h-12 w-12 shadow-card'
+          } ${
+            handsFree ? 'border-brass/40 bg-brass/15 text-brass-deep' : 'border-line bg-surface text-ink-soft hover:bg-sunk hover:text-ink'
           }`}
         >
-          <IconTalk width={15} height={15} />
-          {handsFree ? 'End' : 'Talk'}
+          <IconTalk width={compact ? 15 : 18} height={compact ? 15 : 18} />
+          {compact ? <span>{handsFree ? 'End' : 'Talk'}</span> : <span className="sr-only">{handsFree ? 'End hands-free' : 'Talk hands-free'}</span>}
         </button>
       )}
       </div>
@@ -1177,6 +1279,10 @@ function Composer({ compact, app = false, dropInto }: { compact: boolean; app?: 
           That's what I heard — fix anything I got wrong, then press Enter.
         </p>
       )}
+      {!attachError && !uploading && !heard && !listening && (
+        <p className="mt-1.5 hidden text-center text-[11px] text-ink-faint sm:block">Enter to send · Shift+Enter for a new line</p>
+      )}
+    </div>
     </div>
   );
 }
@@ -1258,10 +1364,35 @@ function VoiceBar() {
 
 // ── The conversation ────────────────────────────────────────
 
-export function AssistantChat({ compact = false, app = false }: { compact?: boolean; app?: boolean }) {
+export function AssistantChat({
+  compact = false,
+  app = false,
+  page = false,
+}: {
+  compact?: boolean;
+  app?: boolean;
+  /**
+   * The conversation is the page: it scrolls with the window rather than
+   * inside a box of its own, and the composer sticks to the bottom of the
+   * screen. The side panel and the app keep their own scroll.
+   */
+  page?: boolean;
+}) {
   const { messages, pending, status, send, briefingLoading, handsFree, micError, setMicError } = useAssistant();
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+
+  // On the page the window is the scroller, so "has the person scrolled up
+  // to read something" is read from the window instead.
+  useEffect(() => {
+    if (!page) return;
+    const onScroll = () => {
+      const root = document.documentElement;
+      pinned.current = root.scrollHeight - window.scrollY - window.innerHeight < 120;
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, [page]);
   // Files dropped anywhere on the conversation go to the composer.
   const dropInto = useRef<((files: File[]) => void) | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -1275,13 +1406,17 @@ export function AssistantChat({ compact = false, app = false }: { compact?: bool
     if (!el) return;
     // A fresh conversation reads from the top: the guide starts there.
     if (messages.length === 0) {
-      el.scrollTo({ top: 0 });
+      if (page) window.scrollTo({ top: 0 });
+      else el.scrollTo({ top: 0 });
       pinned.current = true;
       return;
     }
     const last = messages[messages.length - 1];
-    if (pinned.current || last?.role === 'user') el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [messages, pending, status]);
+    if (pinned.current || last?.role === 'user') {
+      if (page) window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+      else el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    }
+  }, [messages, pending, status, page]);
 
   const last = messages[messages.length - 1];
   const suggestions = !pending && last?.role === 'assistant' ? (last.answer?.suggestions ?? []) : [];
@@ -1326,51 +1461,63 @@ export function AssistantChat({ compact = false, app = false }: { compact?: bool
           const el = e.currentTarget;
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
         }}
-        className={`min-h-0 flex-1 overflow-y-auto ${
+        className={`flex-1 ${page ? '' : 'min-h-0 overflow-y-auto'} ${
           messages.length === 0 && !briefingLoading
             ? 'flex flex-col items-center justify-center px-4 py-8'
-            : 'space-y-4 px-4 py-5'
+            : `space-y-4 px-4 ${page ? 'pb-6 pt-12' : 'py-5'}`
         }`}
       >
         {messages.length === 0 &&
           (briefingLoading ? (
             <Working status="Getting today's briefing" />
           ) : (
-            <div className="flex w-full max-w-2xl flex-col items-center gap-5 text-center">
+            <div className={`flex w-full flex-col items-center text-center ${compact ? 'max-w-sm gap-5' : 'max-w-2xl gap-7'}`}>
               <div>
-                <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-brass/10 ring-1 ring-brass/20">
-                  <IconActivity width={26} height={26} className="text-brass-deep" />
+                <div className={`mx-auto grid place-items-center rounded-2xl bg-brass/10 ring-1 ring-brass/20 ${compact ? 'mb-3 h-12 w-12' : 'mb-5 h-14 w-14'}`}>
+                  <IconSparkle width={compact ? 22 : 26} height={compact ? 22 : 26} className="text-brass-deep" />
                 </div>
-                <h2 className="text-[17px] font-semibold text-ink">{ASSISTANT_NAME}</h2>
-                <p className="mt-1.5 text-[13px] text-ink-soft">
-                  Ask about tasks, emails, projects, or tell me what you need done.
+                <h2 className={`font-semibold leading-tight tracking-tight text-ink ${compact ? 'text-[17px]' : 'text-[24px]'}`}>
+                  What would you like to know about the studio?
+                </h2>
+                <p className={`mx-auto mt-2.5 leading-relaxed text-ink-soft ${compact ? 'max-w-xs text-[12.5px]' : 'max-w-lg text-[14px]'}`}>
+                  Ask a question in plain English. {ASSISTANT_NAME} searches the studio's tasks, mail, projects and Drive and explains what she finds, naming where each answer came from.
                 </p>
               </div>
-              <div className="flex flex-wrap justify-center gap-2">
-                {QUICK_SUGGESTIONS.map((s) => (
+              <div className={`grid w-full gap-3 ${compact ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+                {QUICK_CARDS.map(({ label, question, icon: Icon }) => (
                   <button
-                    key={s}
+                    key={question}
                     type="button"
-                    onClick={() => send(s)}
-                    className="focusable rounded-full border border-line bg-surface px-3.5 py-1.5 text-[12.5px] text-ink-soft transition-colors hover:border-brass/50 hover:bg-brass/5 hover:text-ink"
+                    onClick={() => send(question)}
+                    className="focusable flex items-start gap-3 rounded-xl border border-line bg-surface px-3.5 py-3 text-left shadow-card transition-colors hover:border-brass/50 hover:bg-brass/5"
                   >
-                    {s}
+                    <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brass/10 text-brass-deep">
+                      <Icon width={16} height={16} />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block text-[10.5px] font-semibold uppercase tracking-[0.1em] text-ink-faint">{label}</span>
+                      <span className="mt-0.5 block text-[13.5px] leading-snug text-ink">{question}</span>
+                    </span>
                   </button>
                 ))}
               </div>
             </div>
           ))}
 
-        {messages.map((m, i) => (
-          <div key={m.id} className="space-y-4">
-            {(i === 0 || dayLabel(messages[i - 1].at) !== dayLabel(m.at)) && <DayDivider at={m.at} />}
-            <MessageView message={m} compact={compact} app={app} />
-          </div>
-        ))}
+        {/* One readable column on the page, like the reading width of a
+            document; the panel is already narrow. */}
+        <div className={`space-y-4 ${compact || app ? '' : 'mx-auto w-full max-w-6xl'}`}>
+          {messages.map((m, i) => (
+            <div key={m.id} className="space-y-4">
+              {(i === 0 || dayLabel(messages[i - 1].at) !== dayLabel(m.at)) && <DayDivider at={m.at} />}
+              <MessageView message={m} compact={compact} app={app} />
+            </div>
+          ))}
 
-        <Suggestions items={suggestions} onPick={send} disabled={pending} />
+          <Suggestions items={suggestions} onPick={send} disabled={pending} />
 
-        {pending && <Working status={status} />}
+          {pending && <Working status={status} />}
+        </div>
       </div>
 
       {/*
@@ -1403,7 +1550,7 @@ export function AssistantChat({ compact = false, app = false }: { compact?: bool
         </div>
       )}
 
-      {handsFree ? <VoiceBar /> : <Composer compact={compact} app={app} dropInto={dropInto} />}
+      {handsFree ? <VoiceBar /> : <Composer compact={compact} app={app} page={page} dropInto={dropInto} />}
     </div>
   );
 }

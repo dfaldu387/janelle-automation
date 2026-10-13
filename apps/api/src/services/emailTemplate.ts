@@ -217,15 +217,20 @@ ${button(url, 'Open the workflow system')}
   };
 }
 
-// ── The task reminders: a morning plan and an evening wrap-up ───────
+// ── The task reminders: morning priorities and an end-of-day check-in ──
 
 /**
  * Two emails a day, for two different jobs.
  *
- *   morning  what to do today: whatever was left unfinished from earlier days,
- *            and what is due today.
- *   evening  how the day went: what got done, what is still pending, and what
- *            is due tomorrow — so tomorrow starts from a list, not from memory.
+ *   morning  what to put first today: a person's top few priorities, most
+ *            urgent at the top, and a count of the rest.
+ *   evening  the end-of-day check-in: what got done, what is still open and
+ *            rolls to tomorrow, what is blocked — and a plain question about
+ *            what is in the way, so tomorrow's plan can account for it.
+ *
+ * Neither is an inventory. The first version listed every overdue task, which
+ * at a few hundred reads as noise; the full list is on the board, and a
+ * reminder's job is to name the handful that matter today.
  */
 export type ReminderSlot = 'morning' | 'evening';
 
@@ -251,37 +256,78 @@ export interface MiddayTaskRow {
   /** crit: carried over from an earlier day. warn: due today. neutral: due tomorrow. good: finished today. */
   tone: DueTone;
   blocked: boolean;
+  /** Why it is blocked, in the person's own words from their check-in — shown under the title. */
+  note?: string | null;
 }
 
-export interface MiddayGroup {
-  /** The kind of work, upper-cased: "DESIGN", "FF&E", "PROCUREMENT & SHIPPING", "ADMIN & OPERATIONS". */
+/**
+ * One short list in a reminder: the rows actually shown, and how many tasks
+ * the list stands for. The caller caps the rows; the template says "+ N more"
+ * for the rest. A list long enough to need scrolling is one nobody reads.
+ */
+export interface MiddaySection {
+  /** "Top priorities", "Blocked", "Finished today", "Due tomorrow"... */
   label: string;
+  /** A line under the label saying what to do with the list, when it needs one. */
+  hint?: string;
   rows: MiddayTaskRow[];
+  /** Tasks the section stands for, including those beyond `rows`. */
+  total: number;
+  /** Rank the rows 1, 2, 3 — an order of work, not a set. */
+  numbered?: boolean;
 }
 
-/** What is in a set of groups, by what the row's colour says it is. */
-function tally(groups: MiddayGroup[]): { carried: number; today: number; tomorrow: number; done: number } {
-  const rows = groups.flatMap((g) => g.rows);
-  const n = (tone: DueTone) => rows.filter((r) => r.tone === tone).length;
-  return { carried: n('crit'), today: n('warn'), tomorrow: n('neutral'), done: n('good') };
+/** The numbers behind a plan: what a subject line and a person's card say. */
+export interface MiddayCounts {
+  /** Open, actionable, and due before today. */
+  overdue: number;
+  /** Open, actionable, and due today. */
+  today: number;
+  /** Open but waiting on someone — not counted in overdue/today. */
+  blocked: number;
+  /** Finished today (evening only). */
+  done: number;
+  /** Due tomorrow (evening only). */
+  tomorrow: number;
 }
 
-function taskRowHtml(t: MiddayTaskRow): string {
+/** One person's reminder, or one person's card in the owner's: a few short lists and the counts. */
+export interface MiddayPlan {
+  sections: MiddaySection[];
+  counts: MiddayCounts;
+  /**
+   * What the person said in last night's check-in reply that could not be
+   * pinned to one task. Shown whole, under their lists, so a blocker typed in
+   * a hurry still reaches the morning plan — theirs and the owner's.
+   */
+  notes?: string[];
+}
+
+function taskRowHtml(t: MiddayTaskRow, rank?: number): string {
   const color = TONE_COLOR[t.tone];
-  const meta = [t.project, t.dueText].filter((s): s is string => !!s).map(escape).join(' · ');
+  const meta = [t.category, t.project, t.dueText].filter((s): s is string => !!s).map(escape).join(' · ');
   const done = t.tone === 'good';
+  const marker =
+    rank !== undefined
+      ? `<div style="width:18px;height:18px;border-radius:50%;background:${C.sunk};font-family:${FONT};font-size:11px;font-weight:700;color:${C.inkSoft};text-align:center;line-height:18px;">${rank}</div>`
+      : `<div style="width:6px;height:6px;border-radius:50%;background:${color};margin-top:6px;"></div>`;
   return `<tr>
-  <td style="padding:9px 0;border-bottom:1px solid ${C.line};">
+  <td style="padding:8px 0;border-bottom:1px solid ${C.line};">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
       <tr>
-        <td style="width:14px;vertical-align:top;padding-top:6px;">
-          <div style="width:6px;height:6px;border-radius:50%;background:${color};"></div>
+        <td style="width:${rank !== undefined ? 26 : 14}px;vertical-align:top;padding-top:1px;">
+          ${marker}
         </td>
         <td style="font-family:${FONT};">
           <div style="font-size:13.5px;font-weight:600;color:${done ? C.inkSoft : C.ink};line-height:1.4;${
     done ? 'text-decoration:line-through;' : ''
   }">${escape(t.title)}${t.blocked ? ` <span style="color:${C.crit};font-weight:700;text-decoration:none;">· blocked</span>` : ''}</div>
           <div style="margin-top:1px;font-size:12px;color:${color};line-height:1.5;">${done ? '✓ ' : ''}${meta}</div>
+          ${
+            t.note
+              ? `<div style="margin-top:3px;font-size:12.5px;color:${C.ink};line-height:1.5;border-left:2px solid ${C.crit};padding-left:8px;">${escape(t.note)}</div>`
+              : ''
+          }
         </td>
       </tr>
     </table>
@@ -289,68 +335,155 @@ function taskRowHtml(t: MiddayTaskRow): string {
 </tr>`;
 }
 
-function taskRowText(t: MiddayTaskRow): string {
-  const meta = [t.project, t.dueText].filter(Boolean).join(' — ');
-  return `  ${t.tone === 'good' ? '[x]' : '- '} ${t.title}${meta ? ` (${meta})` : ''}${t.blocked ? ' [blocked]' : ''}`;
+function taskRowText(t: MiddayTaskRow, rank?: number): string {
+  const meta = [t.category, t.project, t.dueText].filter(Boolean).join(' — ');
+  const bullet = t.tone === 'good' ? '[x]' : rank !== undefined ? `${rank}.` : '-';
+  const line = `  ${bullet} ${t.title}${meta ? ` (${meta})` : ''}${t.blocked ? ' [blocked]' : ''}`;
+  return t.note ? `${line}\n       ↳ ${t.note}` : line;
 }
 
-function groupHtml(g: MiddayGroup): string {
-  if (!g.rows.length) return '';
-  return `<div style="margin-top:16px;">
+/**
+ * "+ 12 more on the board" — the rest of a capped list, as a count. A section
+ * shown as a count alone (the owner's "Finished today (4)") needs no such
+ * line: the label already says the number.
+ */
+function moreLine(s: MiddaySection): string {
+  const more = s.total - s.rows.length;
+  return more > 0 && s.rows.length ? `+ ${more} more on the board` : '';
+}
+
+function sectionHtml(s: MiddaySection): string {
+  if (!s.total) return '';
+  const more = moreLine(s);
+  return `<div style="margin-top:18px;">
   <div style="font-family:${FONT};font-size:10.5px;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:${C.inkFaint};padding-bottom:2px;">
-    ${escape(g.label)} <span style="font-weight:600;">(${g.rows.length})</span>
+    ${escape(s.label)} <span style="font-weight:600;">(${s.total})</span>
   </div>
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
-    ${g.rows.map(taskRowHtml).join('')}
-  </table>
+  ${s.hint ? `<div style="font-family:${FONT};font-size:12px;color:${C.inkSoft};line-height:1.5;padding-bottom:4px;">${escape(s.hint)}</div>` : ''}
+  ${
+    s.rows.length
+      ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+    ${s.rows.map((r, i) => taskRowHtml(r, s.numbered ? i + 1 : undefined)).join('')}
+  </table>`
+      : ''
+  }
+  ${more ? `<div style="font-family:${FONT};font-size:12px;color:${C.inkFaint};padding-top:8px;">${escape(more)}</div>` : ''}
 </div>`;
 }
 
-function groupText(g: MiddayGroup): string {
-  if (!g.rows.length) return '';
-  return `${g.label} (${g.rows.length})\n${g.rows.map(taskRowText).join('\n')}`;
+function sectionText(s: MiddaySection): string {
+  if (!s.total) return '';
+  const more = moreLine(s);
+  return [
+    `${s.label.toUpperCase()} (${s.total})`,
+    s.hint ?? '',
+    ...s.rows.map((r, i) => taskRowText(r, s.numbered ? i + 1 : undefined)),
+    more ? `  ${more}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
-/** Every group in `groups` that has at least one row, rendered as HTML. */
-function groupsHtml(groups: MiddayGroup[]): string {
-  return groups.map(groupHtml).join('');
+const NOTES_LABEL = 'From the check-in reply';
+
+function notesHtml(notes: string[] | undefined): string {
+  if (!notes?.length) return '';
+  return `<div style="margin-top:18px;">
+  <div style="font-family:${FONT};font-size:10.5px;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:${C.inkFaint};padding-bottom:4px;">
+    ${escape(NOTES_LABEL)}
+  </div>
+  ${notes
+    .map(
+      (n) =>
+        `<div style="font-family:${FONT};font-size:13px;color:${C.ink};line-height:1.55;border-left:2px solid ${C.brass};padding:2px 0 2px 10px;margin-top:6px;white-space:pre-line;">${escape(n)}</div>`,
+    )
+    .join('')}
+</div>`;
 }
 
-function groupsText(groups: MiddayGroup[]): string {
-  return groups
-    .filter((g) => g.rows.length)
-    .map(groupText)
-    .join('\n\n');
+function notesText(notes: string[] | undefined): string {
+  if (!notes?.length) return '';
+  return [NOTES_LABEL.toUpperCase(), ...notes.map((n) => `  “${n.replace(/\s+/g, ' ')}”`)].join('\n');
 }
 
-/** Total tasks across every group. */
-function countOf(groups: MiddayGroup[]): number {
-  return groups.reduce((n, g) => n + g.rows.length, 0);
+function planHtml(p: MiddayPlan): string {
+  return p.sections.map(sectionHtml).join('') + notesHtml(p.notes);
 }
 
-/** The sentence under the greeting, and what it promises the email holds. */
+function planText(p: MiddayPlan): string {
+  return [...p.sections.filter((s) => s.total).map(sectionText), notesText(p.notes)].filter(Boolean).join('\n\n');
+}
+
+/** "3 overdue, 2 due today, 1 blocked" — the numbers that matter at this time of day. */
+function headline(slot: ReminderSlot, c: MiddayCounts): string {
+  const open = c.overdue + c.today;
+  const parts =
+    slot === 'morning'
+      ? [c.overdue ? `${c.overdue} overdue` : '', c.today ? `${c.today} due today` : '', c.blocked ? `${c.blocked} blocked` : '']
+      : [
+          `${c.done} done`,
+          `${open} still open`,
+          c.blocked ? `${c.blocked} blocked` : '',
+          c.tomorrow ? `${c.tomorrow} due tomorrow` : '',
+        ];
+  const line = parts.filter(Boolean).join(', ');
+  return line || 'nothing due today';
+}
+
+/** The sentence under the greeting: what the email is, and what it is not. */
 function intro(slot: ReminderSlot, scope: 'yours' | 'studio'): string {
-  const who = scope === 'yours' ? '' : ' across the studio';
-  return slot === 'morning'
-    ? `Good morning — here is what was left unfinished from earlier days and what is due today${who}, grouped by kind of work.`
-    : `Here is how today went${who}: what got done, what is still pending, and what is due tomorrow — grouped by kind of work.`;
-}
-
-/** One line for a subject or a card: the numbers that matter at this time of day. */
-function headline(slot: ReminderSlot, groups: MiddayGroup[]): string {
-  const t = tally(groups);
-  const pending = t.carried + t.today;
-  if (slot === 'morning') {
-    return `${pending} to do today${t.carried ? `, ${t.carried} carried over` : ''}`;
+  if (scope === 'yours') {
+    return slot === 'morning'
+      ? 'Good morning — here is what to put first today, most urgent at the top. Everything else is on the board; these few are the ones to get through.'
+      : 'Here is how today went and what rolls into tomorrow. If anything is stuck, say so below so tomorrow’s plan can account for it.';
   }
-  return `${t.done} done, ${pending} pending${t.tomorrow ? `, ${t.tomorrow} due tomorrow` : ''}`;
+  return slot === 'morning'
+    ? 'Good morning — each person’s top priorities for today, with how much sits behind them. The full lists are on the board.'
+    : 'How the day went, person by person: what got done, what is still open, and what is blocked.';
 }
 
-/** Each teammate's own reminder. */
-export function middayPersonalEmail(opts: { name: string; slot: ReminderSlot; groups: MiddayGroup[]; boardUrl?: string }): Mail {
+/**
+ * The evening's one question, set apart so it is not read as another list.
+ * Three ways to answer, all of which land on the task and on tomorrow's
+ * plan (services/checkin.ts): a reply to this email, the check-in in Jenny,
+ * or the board itself.
+ */
+function checkInHtml(checkinUrl?: string): string {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:22px;">
+  <tr>
+    <td style="background:${C.sunk};border-left:3px solid ${C.brass};border-radius:0 10px 10px 0;padding:14px 16px;font-family:${FONT};">
+      <div style="font-size:13.5px;font-weight:700;color:${C.ink};">Anything in your way?</div>
+      <div style="margin-top:4px;font-size:13px;line-height:1.55;color:${C.inkSoft};">
+        Reply to this email with what is done and what is blocking you${
+          checkinUrl ? `, or <a href="${escape(checkinUrl)}" style="color:${C.brassDeep};font-weight:600;">answer the check-in with Jenny</a>` : ''
+        } — a button per task. Either way it is on the task and on tomorrow morning’s plan.
+      </div>
+    </td>
+  </tr>
+</table>`;
+}
+
+function checkInText(checkinUrl?: string): string {
+  return `Anything in your way? Reply to this email with what is done and what is blocking you${
+    checkinUrl ? `, or answer the check-in with Jenny: ${checkinUrl}` : ''
+  } — either way it is on the task and on tomorrow morning’s plan.`;
+}
+
+const FOOTER_TEXT = ['—', 'Sent by the Janelle Interiors workflow system.'];
+
+/** Each teammate's own reminder: the morning priorities, or the end-of-day check-in. */
+export function middayPersonalEmail(opts: {
+  name: string;
+  slot: ReminderSlot;
+  plan: MiddayPlan;
+  boardUrl?: string;
+  /** Jenny's end-of-day check-in, linked from the evening email. */
+  checkinUrl?: string;
+}): Mail {
   const hi = greeting(opts.name);
   const lead = intro(opts.slot, 'yours');
-  const line = headline(opts.slot, opts.groups);
+  const line = headline(opts.slot, opts.plan.counts);
+  const evening = opts.slot === 'evening';
 
   const body = `
 <div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
@@ -359,7 +492,8 @@ export function middayPersonalEmail(opts: { name: string; slot: ReminderSlot; gr
   ${escape(lead)}
 </div>
 
-${groupsHtml(opts.groups)}
+${planHtml(opts.plan)}
+${evening ? checkInHtml(opts.checkinUrl) : ''}
 ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
 
   const text = [
@@ -367,71 +501,88 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
     '',
     lead,
     '',
-    groupsText(opts.groups),
+    planText(opts.plan),
+    evening ? `\n${checkInText(opts.checkinUrl)}` : '',
     opts.boardUrl ? `\nOpen the task board: ${opts.boardUrl}` : '',
     '',
-    '—',
-    'Sent by the Janelle Interiors workflow system.',
+    ...FOOTER_TEXT,
   ]
     .filter((l) => l !== '')
     .join('\n');
 
   return {
-    subject: `${opts.slot === 'morning' ? 'Today’s tasks' : 'Evening wrap-up'} — ${line}`,
+    subject: `${evening ? 'End-of-day check-in' : 'Your priorities today'} — ${line}`,
     text,
     html: shell(line, body),
   };
 }
 
-/** The owner's copy: the whole studio, one card per person. */
+/**
+ * The owner's copy: one short card per person — their numbers and their top
+ * few — so the whole studio reads in a screen, and who is behind or blocked is
+ * visible without a list of everything.
+ */
 export function middayOwnerEmail(opts: {
   name: string;
   slot: ReminderSlot;
-  people: { name: string; groups: MiddayGroup[] }[];
-  unassigned: MiddayGroup[];
+  people: { name: string; plan: MiddayPlan }[];
+  unassigned: MiddayPlan;
   boardUrl?: string;
 }): Mail {
   const hi = greeting(opts.name);
   const lead = intro(opts.slot, 'studio');
-  const everyone = [...opts.people.flatMap((p) => p.groups), ...opts.unassigned];
-  const line = headline(opts.slot, everyone);
+  const evening = opts.slot === 'evening';
 
-  const personCard = (name: string, groups: MiddayGroup[]): string => {
-    const t = tally(groups);
-    const parts =
-      opts.slot === 'morning'
-        ? [
-            t.carried ? `<span style="color:${C.crit};font-weight:600;">${t.carried} carried over</span>` : '',
-            t.today ? `<span style="color:${C.warn};font-weight:600;">${t.today} today</span>` : '',
-          ]
-        : [
-            t.done ? `<span style="color:${C.good};font-weight:600;">${t.done} done</span>` : '',
-            t.carried + t.today ? `<span style="color:${C.warn};font-weight:600;">${t.carried + t.today} pending</span>` : '',
-            t.tomorrow ? `${t.tomorrow} tomorrow` : '',
-          ];
-    const summary = parts.filter(Boolean).join(' &middot; ');
-    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;border:1px solid ${C.line};border-radius:10px;">
+  const sum = (pick: (c: MiddayCounts) => number) =>
+    [...opts.people.map((p) => p.plan.counts), opts.unassigned.counts].reduce((n, c) => n + pick(c), 0);
+  const studio: MiddayCounts = {
+    overdue: sum((c) => c.overdue),
+    today: sum((c) => c.today),
+    blocked: sum((c) => c.blocked),
+    done: sum((c) => c.done),
+    tomorrow: sum((c) => c.tomorrow),
+  };
+  const line = `${opts.people.length} ${opts.people.length === 1 ? 'person' : 'people'} · ${headline(opts.slot, studio)}`;
+
+  const chips = (c: MiddayCounts): string => {
+    const open = c.overdue + c.today;
+    const parts = evening
+      ? [
+          c.done ? `<span style="color:${C.good};font-weight:600;">${c.done} done</span>` : '',
+          open ? `<span style="color:${C.warn};font-weight:600;">${open} still open</span>` : '',
+          c.blocked ? `<span style="color:${C.crit};font-weight:600;">${c.blocked} blocked</span>` : '',
+          c.tomorrow ? `${c.tomorrow} tomorrow` : '',
+        ]
+      : [
+          c.overdue ? `<span style="color:${C.crit};font-weight:600;">${c.overdue} overdue</span>` : '',
+          c.today ? `<span style="color:${C.warn};font-weight:600;">${c.today} today</span>` : '',
+          c.blocked ? `<span style="color:${C.crit};font-weight:600;">${c.blocked} blocked</span>` : '',
+        ];
+    return parts.filter(Boolean).join(' &middot; ');
+  };
+
+  const personCard = (name: string, plan: MiddayPlan): string => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;border:1px solid ${C.line};border-radius:10px;">
   <tr>
     <td style="background:${C.sunk};padding:10px 14px;border-radius:10px 10px 0 0;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
         <tr>
           <td style="font-family:${FONT};font-size:13.5px;font-weight:700;color:${C.ink};">${escape(name)}</td>
-          <td align="right" style="font-family:${FONT};font-size:11.5px;color:${C.inkFaint};white-space:nowrap;">${summary}</td>
+          <td align="right" style="font-family:${FONT};font-size:11.5px;color:${C.inkFaint};white-space:nowrap;">${chips(plan.counts)}</td>
         </tr>
       </table>
     </td>
   </tr>
   <tr>
-    <td style="padding:2px 14px 12px 14px;">
-      ${groupsHtml(groups)}
+    <td style="padding:0 14px 12px 14px;">
+      ${planHtml(plan)}
     </td>
   </tr>
 </table>`;
-  };
 
+  const hasRows = (p: MiddayPlan) => p.sections.some((s) => s.total > 0);
   const cards = [
-    ...opts.people.map((p) => personCard(p.name, p.groups)),
-    countOf(opts.unassigned) ? personCard('Unassigned', opts.unassigned) : '',
+    ...opts.people.map((p) => personCard(p.name, p.plan)),
+    hasRows(opts.unassigned) ? personCard('Unassigned', opts.unassigned) : '',
   ]
     .filter(Boolean)
     .join('');
@@ -446,28 +597,28 @@ export function middayOwnerEmail(opts: {
 ${cards}
 ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
 
-  const personText = (name: string, groups: MiddayGroup[]): string => `${name.toUpperCase()} (${countOf(groups)})\n${groupsText(groups)}`;
+  const personText = (name: string, plan: MiddayPlan): string =>
+    `${name.toUpperCase()} — ${headline(opts.slot, plan.counts)}\n${planText(plan)}`;
   const text = [
     hi,
     '',
     lead,
     '',
     [
-      ...opts.people.map((p) => personText(p.name, p.groups)),
-      countOf(opts.unassigned) ? personText('Unassigned', opts.unassigned) : '',
+      ...opts.people.map((p) => personText(p.name, p.plan)),
+      hasRows(opts.unassigned) ? personText('Unassigned', opts.unassigned) : '',
     ]
       .filter(Boolean)
       .join('\n\n'),
     opts.boardUrl ? `\nOpen the task board: ${opts.boardUrl}` : '',
     '',
-    '—',
-    'Sent by the Janelle Interiors workflow system.',
+    ...FOOTER_TEXT,
   ]
     .filter((l) => l !== '')
     .join('\n');
 
   return {
-    subject: `${opts.slot === 'morning' ? 'Team plan for today' : 'Team wrap-up'} — ${line}`,
+    subject: `${evening ? 'Team end-of-day check-in' : 'Team priorities today'} — ${line}`,
     text,
     html: shell(line, body),
   };

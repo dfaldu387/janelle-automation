@@ -1,5 +1,6 @@
 import {
   ASSISTANT_NAME,
+  CHECKIN_PROMPT,
   canManageTasks,
   canSupervise,
   type AssistantAnswer,
@@ -273,6 +274,10 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   }
 
   const suggestions: string[] = [];
+  // After four, the day's question is not what to start but what got done.
+  // The chip is answered by the browser (AssistantContext) with the
+  // check-in itself, not sent to the model.
+  if ((opts.hour ?? -1) >= 16 && (overdue.length || dueToday.length)) suggestions.push(CHECKIN_PROMPT);
   if (overdue.length || dueToday.length) suggestions.push('What should I tackle first?');
   if (role === 'principal') suggestions.push('What are clients waiting on?');
   if (supervises) suggestions.push("Read me this morning's digest");
