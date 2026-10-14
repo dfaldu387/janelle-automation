@@ -30,8 +30,14 @@ export function ConnectGooglePrompt() {
   // been awaited before the shell renders, so this is known on the first
   // paint. Fetching it here again is what made the prompt arrive late,
   // after the dashboard had drawn itself.
-  const { user, googleConnected, signOut } = useAuth();
+  const { user, googleConnected, googleNeedsReconnect, signOut } = useAuth();
   const connect = useConnectGoogle();
+
+  // Connected on paper, but Google has refused the grant — reading has quietly
+  // stopped. Treated exactly like a first connect, so signing in puts the
+  // reconnect in front of them instead of leaving them on stale mail. The
+  // copy below changes to say so; the action is the same consent screen.
+  const reconnect = googleConnected === true && googleNeedsReconnect;
 
   // `null` means the answer has not arrived — never guess "not connected"
   // and flash the prompt at somebody who has already done this.
@@ -44,7 +50,7 @@ export function ConnectGooglePrompt() {
   // Never while the admin is signed in as a teammate: connecting from here
   // would attach the admin's Google to the teammate's login, and the blocking
   // sheet would stop the admin seeing the very screen they came to check.
-  const showing = Boolean(user) && googleConnected === false && !readImpersonation();
+  const showing = Boolean(user) && (googleConnected === false || reconnect) && !readImpersonation();
 
   if (!showing) return null;
 
@@ -64,11 +70,12 @@ export function ConnectGooglePrompt() {
             <IconGoogle />
           </span>
           <h2 id="connect-heading" className="mt-4 text-[18px] font-semibold leading-snug text-ink">
-            Connect your Gmail and Drive
+            {reconnect ? 'Reconnect your Gmail and Drive' : 'Connect your Gmail and Drive'}
           </h2>
           <p className="mt-2 text-[13.5px] leading-relaxed text-ink-soft">
-            This is how the studio reads your project mail, files it against the right job, and raises
-            the work it finds. Until it is connected, your board stays empty.
+            {reconnect
+              ? 'Google has stopped the studio reading your mail — this happens after a password change or when access times out. Until you reconnect, nothing new comes in and your board falls behind. It is one tap.'
+              : 'This is how the studio reads your project mail, files it against the right job, and raises the work it finds. Until it is connected, your board stays empty.'}
           </p>
 
           <ul className="mt-4 space-y-2 text-[13px] text-ink-soft">
@@ -101,7 +108,7 @@ export function ConnectGooglePrompt() {
             onClick={() => connect.mutate({ service: 'all', next: 'dashboard' })}
             className="btn-primary btn-sm"
           >
-            {connect.isPending ? 'Opening Google…' : 'Connect Gmail & Drive'}
+            {connect.isPending ? 'Opening Google…' : reconnect ? 'Reconnect Gmail & Drive' : 'Connect Gmail & Drive'}
           </button>
         </div>
 

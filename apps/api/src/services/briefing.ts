@@ -1,6 +1,7 @@
 import {
   ASSISTANT_NAME,
   CHECKIN_PROMPT,
+  DIGEST_PROMPT,
   canManageTasks,
   canSupervise,
   type AssistantAnswer,
@@ -280,7 +281,7 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   if ((opts.hour ?? -1) >= 16 && (overdue.length || dueToday.length)) suggestions.push(CHECKIN_PROMPT);
   if (overdue.length || dueToday.length) suggestions.push('What should I tackle first?');
   if (role === 'principal') suggestions.push('What are clients waiting on?');
-  if (supervises) suggestions.push("Read me this morning's digest");
+  if (supervises) suggestions.push(DIGEST_PROMPT);
   if (watchesOrders) suggestions.push('Which orders are late, and who do I chase?');
   if (watchesSpecs) suggestions.push('Which spec gaps are blocking orders?');
   if (unassigned.length) suggestions.push('Who should take the unassigned tasks?');
@@ -301,6 +302,78 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
       ...(drafts ? ['drafts'] : []),
     ],
     suggestions: [...new Set(suggestions)].slice(0, 3),
+  };
+}
+
+/**
+ * The morning digest, read straight back from where it was stored at 7am.
+ *
+ * "Read me the digest" used to go the long way round — a whole Claude turn
+ * (system prompt, the full tool block, the digest text) spent only to recite
+ * a narrative that was already written and sitting in `digests`. This returns
+ * it with no model call: the stored narrative as the lead, and the tasks
+ * behind it as real, clickable rows, exactly as the tool path would have
+ * rendered them. Everything runs on the caller's own client, so RLS scopes it.
+ */
+export async function buildDigest(ctx: AssistantContext): Promise<AssistantAnswer> {
+  const { db } = ctx;
+  const today = new Date().toISOString().slice(0, 10);
+
+  type DigestRow = { digest_date: string; narrative: string | null };
+  const digest = (
+    await rowsOf<DigestRow>(() =>
+      db.from('digests').select('digest_date, narrative').order('digest_date', { ascending: false }).limit(1),
+    )
+  )[0];
+
+  // The tasks behind the narrative, live, so each one opens straight through.
+  type LiveTask = {
+    id: string; title: string; status: string; due_date: string | null; assigned_to: string | null;
+    profiles: { full_name: string | null } | null; projects: { name: string } | null;
+  };
+  const live = await rowsOf<LiveTask>(() =>
+    db
+      .from('tasks')
+      .select('id, title, status, due_date, assigned_to, profiles(full_name), projects(name)')
+      .in('status', LIVE)
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .limit(200),
+  );
+
+  const ownerOf = (t: LiveTask) => t.profiles?.full_name ?? 'Unassigned';
+  const overdue = live.filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked');
+  const shown = new Set(overdue.slice(0, SHOW.overdue).map((t) => t.id));
+  const unassigned = live.filter((t) => !t.assigned_to && !shown.has(t.id));
+
+  const items: AssistantItem[] = [
+    ...overdue
+      .slice(0, SHOW.overdue)
+      .map((t) => taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: ownerOf(t), project: t.projects?.name ?? null })),
+    ...unassigned.slice(0, SHOW.unassigned).map((t) => ({
+      ...taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: 'Nobody yet', project: t.projects?.name ?? null }),
+      meta: 'needs an owner',
+      tone: 'warn' as const,
+    })),
+  ];
+
+  const narrative = (digest?.narrative ?? '').trim();
+  const bits: string[] = [];
+  if (overdue.length) bits.push(`${plural(overdue.length, 'task is', 'tasks are')} overdue`);
+  if (unassigned.length) bits.push(`${plural(unassigned.length, 'task is', 'tasks are')} unassigned`);
+  const lead =
+    narrative ||
+    (bits.length ? `${bits.join(', ')}.` : `Nothing overdue this morning. ${plural(live.length, 'task', 'tasks')} open.`);
+
+  const hidden = Math.max(0, overdue.length - SHOW.overdue) + Math.max(0, unassigned.length - SHOW.unassigned);
+
+  return {
+    lead,
+    items,
+    more: hidden,
+    caveat: digest ? null : 'No digest has run yet today — this is built live from the same data.',
+    speech: lead.replace(/[“”]/g, ''),
+    sources: ['the morning digest', ...(items.length ? ['the task board'] : [])],
+    suggestions: [],
   };
 }
 

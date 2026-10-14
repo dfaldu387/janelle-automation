@@ -1581,6 +1581,11 @@ function GoogleCard() {
   const gmail = google?.services?.gmail ?? false;
   const drive = google?.services?.drive ?? false;
   const anyConnected = gmail || drive;
+  // Connected on paper, but Google has REFUSED the grant — reading has stopped
+  // and no "Connected" badge should pretend otherwise. This is why the card
+  // read "Fully connected" while Jenny said the opposite: the badge followed
+  // the stored status, not whether Google still accepts the grant.
+  const refused = Boolean(google?.needs_reconnect);
 
   return (
     <SettingsCard
@@ -1589,11 +1594,29 @@ function GoogleCard() {
       title="Google Workspace"
       description="Gmail and Drive, together or separately. Read-only, plus drafts in Gmail. Revocable any time."
       status={
-        <Pill tone={gmail && drive ? 'good' : anyConnected ? 'warn' : 'neutral'}>
-          {gmail && drive ? 'Fully connected' : anyConnected ? 'Partially connected' : 'Not connected'}
-        </Pill>
+        refused ? (
+          <Pill tone="crit">Needs reconnecting</Pill>
+        ) : (
+          <Pill tone={gmail && drive ? 'good' : anyConnected ? 'warn' : 'neutral'}>
+            {gmail && drive ? 'Fully connected' : anyConnected ? 'Partially connected' : 'Not connected'}
+          </Pill>
+        )
       }
     >
+      {refused && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-crit/30 bg-crit/10 px-3 py-2.5">
+          <span className="text-[12.5px] leading-snug text-crit">
+            Google has stopped accepting this connection, so nothing new is being read. Reconnect to start it again.
+          </span>
+          <button
+            onClick={() => connectAll.mutate('all')}
+            disabled={connectAll.isPending}
+            className="btn-primary btn-sm shrink-0"
+          >
+            {connectAll.isPending && connectAll.variables === 'all' ? 'Redirecting…' : 'Reconnect Google'}
+          </button>
+        </div>
+      )}
       <div className="grid gap-3 md:grid-cols-2">
         <ServiceCard
           service="gmail"

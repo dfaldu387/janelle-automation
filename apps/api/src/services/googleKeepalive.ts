@@ -1,7 +1,16 @@
 import { supabaseAdmin } from '../lib/supabase.js';
 import { decrypt, encrypt } from '../lib/crypto.js';
-import { oauthClient } from '../lib/google.js';
-import { isGoogleAuthFailure } from '../lib/tokens.js';
+import { GOOGLE_SERVICES, oauthClient, reconnectConsentUrl, servicesGranted, type GoogleService } from '../lib/google.js';
+import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
+import { GOOGLE_HEALTH_ACTION, latestGoogleHealth, type GoogleHealth } from '../lib/googleHealth.js';
+import { gmailFor, sendMessage } from './gmail.js';
+import { reconnectEmail } from './emailTemplate.js';
+
+// Health reading lives in lib/googleHealth.ts now, so `/me` and the choice of
+// studio source mailbox can read it without dragging the keep-alive (and the
+// gmail + email machinery below) in with them. Re-exported so existing callers
+// keep importing it from here.
+export { GOOGLE_HEALTH_ACTION, latestGoogleHealth, type GoogleHealth };
 
 /**
  * Keep every connected Google account connected.
@@ -22,18 +31,21 @@ import { isGoogleAuthFailure } from '../lib/tokens.js';
  *    and the connection itself is left as it was.
  */
 
-export const GOOGLE_HEALTH_ACTION = 'google.health';
-
-export interface GoogleHealth {
-  ok: boolean;
-  /** Why it failed, in Google's words. */
-  reason?: string;
-}
+export const RECONNECT_EMAIL_ACTION = 'google.reconnect_email';
 
 interface IntegrationRow {
   org_id: string;
   user_id: string;
   encrypted_tokens: string | null;
+  /** Granted scopes, so a reconnect asks for exactly the services they had. */
+  scopes: string | null;
+}
+
+/** A grant that lapsed this run, with the services the person had connected. */
+interface Dropped {
+  org_id: string;
+  user_id: string;
+  services: GoogleService[];
 }
 
 const RETRY_DELAYS_MS = [1_000, 4_000];
@@ -83,19 +95,19 @@ async function refreshOne(row: IntegrationRow): Promise<GoogleHealth> {
   }
 }
 
-/** The last recorded health per user, newest first. */
-export async function latestGoogleHealth(userIds: string[]): Promise<Map<string, GoogleHealth & { at: string }>> {
-  const out = new Map<string, GoogleHealth & { at: string }>();
+/** When each user was last emailed a reconnect link, so they are not nagged. */
+async function latestReconnectEmailAt(userIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
   if (!supabaseAdmin || !userIds.length) return out;
   const { data } = await supabaseAdmin
     .from('activity_log')
-    .select('entity_id, meta, created_at')
-    .eq('action', GOOGLE_HEALTH_ACTION)
+    .select('entity_id, created_at')
+    .eq('action', RECONNECT_EMAIL_ACTION)
     .in('entity_id', userIds)
     .order('created_at', { ascending: false })
     .limit(500);
-  for (const row of (data ?? []) as { entity_id: string; meta: GoogleHealth | null; created_at: string }[]) {
-    if (!out.has(row.entity_id) && row.meta) out.set(row.entity_id, { ...row.meta, at: row.created_at });
+  for (const row of (data ?? []) as { entity_id: string; created_at: string }[]) {
+    if (!out.has(row.entity_id)) out.set(row.entity_id, row.created_at);
   }
   return out;
 }
@@ -118,30 +130,142 @@ async function recordIfChanged(row: IntegrationRow, health: GoogleHealth, previo
   });
 }
 
-export async function keepGoogleAlive(): Promise<{ checked: number; healthy: number; needReconnect: number; transient: number }> {
-  const result = { checked: 0, healthy: 0, needReconnect: 0, transient: 0 };
+export async function keepGoogleAlive(): Promise<{
+  checked: number;
+  healthy: number;
+  needReconnect: number;
+  transient: number;
+  reconnectEmails: number;
+}> {
+  const result = { checked: 0, healthy: 0, needReconnect: 0, transient: 0, reconnectEmails: 0 };
   if (!supabaseAdmin) return result;
 
   const { data } = await supabaseAdmin
     .from('integrations')
-    .select('org_id, user_id, encrypted_tokens')
+    .select('org_id, user_id, encrypted_tokens, scopes')
     .eq('provider', 'google')
     .eq('status', 'connected');
   const rows = (data ?? []) as IntegrationRow[];
-  const previous = await latestGoogleHealth(rows.map((r) => r.user_id));
+  const userIds = rows.map((r) => r.user_id);
+  const previous = await latestGoogleHealth(userIds);
+  const emailedAt = await latestReconnectEmailAt(userIds);
+  const runStartedAt = new Date().toISOString();
+
+  // Who refreshed cleanly, per studio: the reconnect note has to be SENT from
+  // a live mailbox, and a studio's own source account is often the one that
+  // dropped — so a dropped person is mailed from whoever is still connected.
+  const healthyByOrg = new Map<string, string[]>();
+  // Grants that need a reconnect mail this run — one per broken spell, below.
+  const dropped: Dropped[] = [];
 
   for (const row of rows) {
     result.checked++;
     try {
       const health = await refreshOne(row);
-      if (health.ok) result.healthy++;
-      else result.needReconnect++;
-      await recordIfChanged(row, health, previous.get(row.user_id));
-      if (!health.ok) console.warn(`[google] ${row.user_id} needs to reconnect: ${health.reason}`);
+      const prev = previous.get(row.user_id);
+      if (health.ok) {
+        result.healthy++;
+        // A sender has to be able to send: only a Gmail-capable account can
+        // carry the reconnect note, so a Drive-only grant is not a candidate.
+        if (servicesGranted(row.scopes).gmail) {
+          healthyByOrg.set(row.org_id, [...(healthyByOrg.get(row.org_id) ?? []), row.user_id]);
+        }
+      } else {
+        result.needReconnect++;
+        console.warn(`[google] ${row.user_id} needs to reconnect: ${health.reason}`);
+        // Mail once per spell of being refused, not every six hours. The spell
+        // began when the grant last changed to bad (or now, if it just did);
+        // mail only if we have not already mailed them since that point. This
+        // reaches accounts already broken before this shipped, yet never nags
+        // one we have already written to about the same drop.
+        const brokenSince = prev && !prev.ok ? prev.at : runStartedAt;
+        const lastMailed = emailedAt.get(row.user_id);
+        if (!lastMailed || lastMailed < brokenSince) {
+          const g = servicesGranted(row.scopes);
+          dropped.push({ org_id: row.org_id, user_id: row.user_id, services: GOOGLE_SERVICES.filter((s) => g[s]) });
+        }
+      }
+      await recordIfChanged(row, health, prev);
     } catch (err) {
       result.transient++;
       console.warn(`[google] ${row.user_id} refresh failed for now, will retry next run:`, (err as Error).message);
     }
   }
+
+  result.reconnectEmails = await emailTheDropped(dropped, healthyByOrg);
   return result;
+}
+
+/**
+ * Tell each person whose grant just lapsed, so they can reconnect themselves —
+ * the one thing that restores it, since Google will not take a new token for a
+ * refused grant. One mail per drop: the transition is read from the health
+ * log, so a service restart does not re-send. Best-effort throughout — a mail
+ * that will not send must not stop the keep-alive, and a studio with no live
+ * mailbox left simply cannot be told, which the Team screen already shows.
+ */
+async function emailTheDropped(dropped: Dropped[], healthyByOrg: Map<string, string[]>): Promise<number> {
+  if (!supabaseAdmin || !dropped.length) return 0;
+
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, email')
+    .in('id', dropped.map((d) => d.user_id));
+  const profile = new Map(
+    ((data ?? []) as { id: string; full_name: string | null; email: string | null }[]).map((p) => [p.id, p]),
+  );
+
+  // Resolved once per studio: its source account if that is among the healthy,
+  // otherwise whichever account refreshed cleanly first.
+  const senderByOrg = new Map<string, string | null>();
+  async function senderFor(orgId: string): Promise<string | null> {
+    if (senderByOrg.has(orgId)) return senderByOrg.get(orgId)!;
+    const healthy = healthyByOrg.get(orgId) ?? [];
+    let id: string | null = null;
+    if (healthy.length) {
+      const source = await orgSourceUserId(orgId);
+      id = source && healthy.includes(source) ? source : healthy[0];
+    }
+    senderByOrg.set(orgId, id);
+    return id;
+  }
+  const gmailCache = new Map<string, Awaited<ReturnType<typeof gmailFor>>>();
+
+  let sent = 0;
+  for (const d of dropped) {
+    const person = profile.get(d.user_id);
+    if (!person?.email) continue;
+    try {
+      const senderId = await senderFor(d.org_id);
+      if (!senderId) {
+        console.warn(`[google] cannot email ${person.email} to reconnect: no live mailbox in their studio`);
+        continue;
+      }
+      if (!gmailCache.has(senderId)) gmailCache.set(senderId, await gmailFor(senderId));
+      const gmail = gmailCache.get(senderId) ?? null;
+      if (!gmail) continue;
+
+      const service: GoogleService | 'all' = d.services.length === 1 ? d.services[0] : 'all';
+      const labels = d.services.map((s): 'Gmail' | 'Drive' => (s === 'gmail' ? 'Gmail' : 'Drive'));
+      const mail = reconnectEmail({
+        name: person.full_name ?? '',
+        url: reconnectConsentUrl(d.user_id, service),
+        services: labels.length ? labels : undefined,
+      });
+      await sendMessage(gmail, { to: person.email, subject: mail.subject, body: mail.text, html: mail.html });
+      sent++;
+
+      await supabaseAdmin.from('activity_log').insert({
+        org_id: d.org_id,
+        actor: null,
+        action: RECONNECT_EMAIL_ACTION,
+        entity: 'integrations',
+        entity_id: d.user_id,
+        meta: { email: person.email },
+      });
+    } catch (err) {
+      console.error(`[google] reconnect email to ${person.email} failed:`, (err as Error).message);
+    }
+  }
+  return sent;
 }

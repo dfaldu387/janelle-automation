@@ -1,9 +1,17 @@
-import crypto from 'node:crypto';
 import { Router } from 'express';
 import { env, isGoogleConfigured } from '../env.js';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { consentUrl, oauthClient, servicesGranted, scopesFor, type GoogleService } from '../lib/google.js';
+import {
+  consentUrl,
+  oauthClient,
+  servicesGranted,
+  scopesFor,
+  signState,
+  verifyState,
+  type GoogleService,
+  type ReturnTo,
+} from '../lib/google.js';
 import { decrypt } from '../lib/crypto.js';
 import { encrypt } from '../lib/crypto.js';
 import { supabaseAdmin } from '../lib/supabase.js';
@@ -11,38 +19,12 @@ import { runIngest } from '../services/ingest.js';
 
 export const authRouter = Router();
 
-/**
- * Simple signed state: "<userId>.<hmac>" so the OAuth callback can
- * trust which user began the flow without a session store.
- */
-function sign(payload: string): string {
-  return crypto
-    .createHmac('sha256', env.tokenEncryptionKey || 'dev')
-    .update(payload)
-    .digest('hex')
-    .slice(0, 32);
-}
-
-/**
- * Where to land once Google is done.
- *
- * Carried in the signed state rather than a query parameter, because the
- * round trip goes out to Google and back and anything not signed could be
- * changed on the way — an open redirect is exactly how that goes wrong. Two
- * fixed destinations, never a URL.
- */
-export type ReturnTo = 'settings' | 'dashboard';
-
-function signState(userId: string, service: string, next: ReturnTo = 'settings'): string {
-  return `${userId}.${service}.${next}.${sign(`${userId}.${service}.${next}`)}`;
-}
-
-function verifyState(state: string): { userId: string; service: string; next: ReturnTo } | null {
-  const [userId, service, next, mac] = state.split('.');
-  if (!userId || !service || !next || !mac) return null;
-  if (next !== 'settings' && next !== 'dashboard') return null;
-  return sign(`${userId}.${service}.${next}`) === mac ? { userId, service, next } : null;
-}
+// The OAuth state signer and the two fixed return destinations live in
+// lib/google.ts, so the keep-alive can mint the same kind of signed consent
+// link when it emails someone to reconnect. `ReturnTo` is carried inside the
+// signed state rather than a query parameter: the round trip goes out to
+// Google and back, and anything not signed could be changed on the way — an
+// open redirect is exactly how that goes wrong.
 
 function parseService(raw: unknown): GoogleService | 'all' {
   return raw === 'gmail' || raw === 'drive' ? raw : 'all';

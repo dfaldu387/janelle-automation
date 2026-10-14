@@ -44,6 +44,12 @@ interface AuthCtx {
    */
   googleConnected: boolean | null;
   /**
+   * Whether Google has REFUSED the connected grant — the status reads
+   * connected, but it must be approved again before anything can be read.
+   * Drives the reconnect prompt on sign-in. False until `/me` has answered.
+   */
+  googleNeedsReconnect: boolean;
+  /**
    * Whether this person may do something. Defaults to allowed while `/me`
    * is still loading, so the shell does not flicker every module away and
    * back on each refresh.
@@ -75,6 +81,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profileError, setProfileError] = useState<string | null>(null);
   /** Whether Google is connected; null until `/me` has answered. */
   const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
+  /** Whether a connected grant has been refused and must be reconnected. */
+  const [googleNeedsReconnect, setGoogleNeedsReconnect] = useState(false);
   // Read from the URL before anything else: supabase-js consumes the hash
   // as it starts up, and by the time a listener is attached the evidence
   // that this was a recovery link can already be gone.
@@ -93,7 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const me = await api<{
         profile: Profile | null;
         access?: Access;
-        google?: { status?: string };
+        google?: { status?: string; needs_reconnect?: string | null };
       }>('/me');
       // `/me` already says whether Google is connected, and this call is
       // awaited before the app renders. Reading it here means the first-run
@@ -104,8 +112,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // the connection) or a missing field keeps what was already known, so
       // a hiccup never raises the connect prompt over a working grant.
       const status = me.google?.status;
-      if (status === 'connected') setGoogleConnected(true);
-      else if (status === 'disconnected') setGoogleConnected(false);
+      if (status === 'connected') {
+        setGoogleConnected(true);
+        // Connected-but-refused: the reconnect prompt keys off this.
+        setGoogleNeedsReconnect(Boolean(me.google?.needs_reconnect));
+      } else if (status === 'disconnected') {
+        setGoogleConnected(false);
+        setGoogleNeedsReconnect(false);
+      }
       if (me.profile?.org_id) {
         setProfile(me.profile);
         setAccess(me.access ?? null);
@@ -158,6 +172,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setAccess(null);
         setProfileError(null);
         setGoogleConnected(null);
+        setGoogleNeedsReconnect(false);
       }
     });
 
@@ -178,6 +193,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfileError(null);
     setRecovery(false);
     setGoogleConnected(null);
+    setGoogleNeedsReconnect(false);
   };
 
   // Unknown means allowed: a slow /me must never look like a revoked module.
@@ -199,7 +215,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <Ctx.Provider
       value={{
         configured: supabaseConfigured, loading, session, profile, user, profileError, may,
-        refresh: loadProfile, signOut, googleConnected,
+        refresh: loadProfile, signOut, googleConnected, googleNeedsReconnect,
         recovery, endRecovery: () => setRecovery(false),
       }}
     >
