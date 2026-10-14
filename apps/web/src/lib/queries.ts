@@ -103,6 +103,8 @@ export interface Me {
     connected_at?: string | null;
     scopes?: string;
     services: Record<GoogleService, boolean>;
+    /** Google refused the connected grant — set to its reason; null when fine. */
+    needs_reconnect?: string | null;
   };
 }
 export function useMe() {

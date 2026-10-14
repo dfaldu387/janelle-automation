@@ -2,6 +2,7 @@ import type { OAuth2Client } from 'google-auth-library';
 import { supabaseAdmin } from './supabase.js';
 import { decrypt, encrypt } from './crypto.js';
 import { oauthClient, servicesGranted, type GoogleService } from './google.js';
+import { latestGoogleHealth } from './googleHealth.js';
 
 /**
  * Build a Google OAuth2 client authenticated as a given user, using
@@ -100,18 +101,30 @@ export async function orgSourceUserId(orgId: string): Promise<string | null> {
   // with one; with a second added on Team & roles, whichever the database
   // returned first became the source — often the one with no Google
   // connection, and reading stopped.
-  const { data: connected } = await supabaseAdmin
+  const { data: connectedRows } = await supabaseAdmin
     .from('integrations')
     .select('user_id, profiles!inner(role, org_id)')
     .eq('org_id', orgId)
     .eq('provider', 'google')
     .eq('status', 'connected')
     .eq('profiles.role', 'principal')
-    .order('connected_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  const source = (connected as { user_id?: string } | null)?.user_id;
-  if (source) return source;
+    .order('connected_at', { ascending: true });
+  const connected = ((connectedRows ?? []) as { user_id: string | null }[])
+    .map((r) => r.user_id)
+    .filter((id): id is string => Boolean(id));
+
+  if (connected.length) {
+    // Prefer a grant Google still ACCEPTS. `status` only says someone once
+    // connected and has not pressed Disconnect — it stays "connected" after
+    // Google has refused the grant, so choosing the oldest connected principal
+    // made a dead mailbox the voice of the studio while a working one sat
+    // right beside it (the account could not read or send a thing, yet every
+    // lookup went through it). The first connected principal with no standing
+    // refusal wins; if every one is refused, the oldest still stands, so this
+    // never does worse than before — it only ever picks a better account.
+    const health = await latestGoogleHealth(connected);
+    return connected.find((id) => health.get(id)?.ok !== false) ?? connected[0];
+  }
 
   const { data } = await supabaseAdmin
     .from('profiles')

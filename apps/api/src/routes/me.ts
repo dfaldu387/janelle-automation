@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/error.js';
 import { servicesGranted } from '../lib/google.js';
 import { hasTaskComments, profileColumns } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { latestGoogleHealth } from '../lib/googleHealth.js';
 import { RESOURCES, canWith } from '@janelle/shared';
 
 export const meRouter = Router();
@@ -29,6 +30,19 @@ meRouter.get(
 
     const connected = integration?.status === 'connected';
     const services = connected ? servicesGranted(integration?.scopes) : { gmail: false, drive: false };
+
+    // A grant Google has REFUSED since it was connected: the status still
+    // reads "connected", but nothing can be read until the person approves
+    // again, and no token can repair it. Surfaced so the app can prompt them
+    // to reconnect the moment they sign in, rather than leaving them staring
+    // at stale mail with no sign anything is wrong. Mirrors Team & Roles.
+    let needsReconnect: string | null = null;
+    if (connected) {
+      const h = (await latestGoogleHealth([userId])).get(userId);
+      if (h && !h.ok && (!integration?.connected_at || h.at > integration.connected_at)) {
+        needsReconnect = h.reason ?? 'Google refused the stored access';
+      }
+    }
 
     // What this person may actually do, with the studio's overrides already
     // applied. The client had no way to ask: it rendered every page to
@@ -56,6 +70,9 @@ meRouter.get(
           connected_at: integration?.connected_at ?? null,
           scopes: integration?.scopes ?? '',
           services,
+          // Null unless the grant is connected-but-refused; carries Google's
+          // reason, for the reconnect prompt.
+          needs_reconnect: needsReconnect,
         },
       },
     });

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { CHECKIN_PROMPT } from '@janelle/shared';
+import { CHECKIN_PROMPT, DIGEST_PROMPT } from '@janelle/shared';
 import {
   AGENT_KEYS,
   ASSISTANT_NAME,
@@ -623,6 +623,8 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const silencesRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const briefingInFlight = useRef(false);
+  /** The last briefing built, reused across new conversations while it is fresh. */
+  const briefingCache = useRef<{ day: string; hour: number; at: number; answer: AssistantAnswer } | null>(null);
   const storeRef = useRef(store);
   storeRef.current = store;
   speakRepliesRef.current = speakReplies;
@@ -786,12 +788,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const openRef = useRef(open);
   openRef.current = open;
 
-  const fetchBriefing = useCallback(async (conversationId?: string, daily = false) => {
-    if (briefingInFlight.current) return;
-    briefingInFlight.current = true;
-    setBriefingLoading(true);
-    try {
-      const answer = await api<AssistantAnswer>(`/assistant/briefing?hour=${new Date().getHours()}`);
+  /** Put a briefing into a conversation — the same way whether built now or reused. */
+  const placeBriefing = useCallback(
+    (answer: AssistantAnswer, conversationId?: string, daily = false) => {
       const onPage = window.location.pathname.startsWith('/assistant');
       update((s) => ({
         ...s,
@@ -800,17 +799,38 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         unseen: openRef.current || onPage ? 0 : thingsIn(answer),
         messages: [
           ...s.messages,
-          {
-            id: newId(),
-            at: Date.now(),
-            role: 'assistant',
-            kind: 'briefing',
-            daily,
-            content: answer.lead,
-            answer,
-          },
+          { id: newId(), at: Date.now(), role: 'assistant', kind: 'briefing', daily, content: answer.lead, answer },
         ],
       }), conversationId);
+    },
+    [update],
+  );
+
+  /** How long a briefing may be replayed before it is rebuilt. */
+  const BRIEFING_TTL_MS = 15 * 60_000;
+
+  const fetchBriefing = useCallback(async (conversationId?: string, daily = false) => {
+    if (briefingInFlight.current) return;
+
+    // Reuse a briefing built moments ago rather than rebuilding it on the
+    // server for every new conversation. The counts and the greeting are still
+    // right inside the window; past it, on a new hour (when the greeting turns
+    // over) or a new day, it is fetched afresh. It is a database read either
+    // way — never a model call — but opening several chats in a row, or
+    // reopening the panel, no longer repeats the work.
+    const now = new Date();
+    const cached = briefingCache.current;
+    if (cached && cached.day === localDay() && cached.hour === now.getHours() && Date.now() - cached.at < BRIEFING_TTL_MS) {
+      placeBriefing(cached.answer, conversationId, daily);
+      return;
+    }
+
+    briefingInFlight.current = true;
+    setBriefingLoading(true);
+    try {
+      const answer = await api<AssistantAnswer>(`/assistant/briefing?hour=${now.getHours()}`);
+      briefingCache.current = { day: localDay(), hour: now.getHours(), at: Date.now(), answer };
+      placeBriefing(answer, conversationId, daily);
     } catch {
       // No briefing is a quiet absence, not an error to show: the backend
       // may simply not be configured yet. The next load tries again.
@@ -818,7 +838,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       briefingInFlight.current = false;
       setBriefingLoading(false);
     }
-  }, [update]);
+  }, [placeBriefing]);
 
   // Once a day, as soon as the app is open — not when the panel is. That is
   // what lets the launcher show a count before anyone thinks to ask.
@@ -878,6 +898,27 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const startCheckin = useCallback(() => {
     void fetchCheckin({ force: true });
   }, [fetchCheckin]);
+
+  // ── The morning digest, read back without the model ──────────
+  //
+  // "Read me the digest" is answered here, like the check-in: it was already
+  // written at 7am and stored, so reciting it costs a database read, not a
+  // whole Claude turn with the system prompt and tool block behind it.
+  const digestInFlight = useRef(false);
+  const fetchDigest = useCallback(async () => {
+    if (digestInFlight.current) return;
+    digestInFlight.current = true;
+    setBriefingLoading(true);
+    try {
+      const answer = await api<AssistantAnswer | null>('/assistant/digest');
+      if (answer) append({ role: 'assistant', kind: 'briefing', content: answer.lead, answer });
+    } catch (err) {
+      append({ role: 'assistant', kind: 'error', content: (err as Error).message, retry: DIGEST_PROMPT });
+    } finally {
+      digestInFlight.current = false;
+      setBriefingLoading(false);
+    }
+  }, [append]);
 
   // Once a day from four in the afternoon, as soon as the app is open — and
   // checked again every few minutes, for an app left open since the morning.
@@ -1006,12 +1047,22 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       const files = (opts.files ?? []).slice(0, 4);
       if ((!typed && !files.length) || abortRef.current) return;
 
-      // The one question answered here rather than by the model: the chip
-      // under the briefing, or the same words typed.
-      if (!files.length && typed.replace(/[.!?]+$/, '').toLowerCase() === CHECKIN_PROMPT.toLowerCase()) {
-        append({ role: 'user', content: typed });
-        void fetchCheckin({ force: true });
-        return;
+      // The two questions answered here rather than by the model: the check-in
+      // and the morning digest. Both are already built and stored, so the chip
+      // under the briefing — or the same words typed — reads them back without
+      // spending a Claude turn.
+      if (!files.length) {
+        const asked = typed.replace(/[.!?]+$/, '').toLowerCase();
+        if (asked === CHECKIN_PROMPT.toLowerCase()) {
+          append({ role: 'user', content: typed });
+          void fetchCheckin({ force: true });
+          return;
+        }
+        if (asked === DIGEST_PROMPT.toLowerCase()) {
+          append({ role: 'user', content: typed });
+          void fetchDigest();
+          return;
+        }
       }
       // A file on its own still asks something: look at it.
       const message =
@@ -1142,7 +1193,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           deliver('Sorry, that did not work. Try asking again.');
         });
     },
-    [append, ask, deliver, path, update, queryClient, fetchCheckin],
+    [append, ask, deliver, path, update, queryClient, fetchCheckin, fetchDigest],
   );
 
   const editMessage = useCallback(
@@ -1167,11 +1218,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     // Every conversation opens with where the studio stands.
     //
     // This used to start blank on the reasoning that the briefing comes once
-    // a day and repeating it would be noise. But opening a new chat is
-    // exactly the moment someone wants the current picture, and by the
-    // afternoon this morning's copy is stale anyway. So it is fetched again
-    // rather than replayed: it is a database read with no model call behind
-    // it, so it costs a moment and nothing else.
+    // a day and repeating it would be noise. But opening a new chat is exactly
+    // the moment someone wants the current picture. So it is shown again —
+    // reused from the last one built when that is still fresh (see
+    // fetchBriefing), and rebuilt only when it has gone stale. Either way it is
+    // a database read with no model call behind it.
     //
     // The target conversation is worked out here, from the ref, rather than
     // inside the updater — a state updater does not run until the next

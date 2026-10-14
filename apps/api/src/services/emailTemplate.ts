@@ -217,6 +217,72 @@ ${button(url, 'Open the workflow system')}
   };
 }
 
+/**
+ * Sent on its own when the studio's keep-alive finds a person's Google
+ * connection has lapsed — Google now refuses the stored access, and only that
+ * person signing in again can restore it (that is what OAuth requires; no
+ * server can do it for them). The button is a pre-signed consent link, so it
+ * is genuinely one tap: approve with Google and they land back in Settings
+ * connected. Nothing they have is lost in the meantime; their mail and tasks
+ * simply stop updating until they reconnect.
+ */
+export function reconnectEmail(opts: { name: string; url: string; services?: ('Gmail' | 'Drive')[] }): Mail {
+  const hi = greeting(opts.name);
+  const url = escape(opts.url);
+  const what = opts.services?.length ? opts.services.join(' and ') : 'Gmail and Drive';
+
+  const body = `
+<div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
+
+<div style="margin-top:14px;font-size:14px;line-height:1.65;color:${C.inkSoft};">
+  Your Google connection to the Janelle Interiors workflow system has stopped working,
+  so the system can no longer read your ${escape(what)}. This happens when Google asks
+  for sign-in again — after a password change, or when access times out.
+</div>
+
+<div style="margin-top:14px;font-size:14px;line-height:1.65;color:${C.inkSoft};">
+  Reconnecting takes one tap: the button below sends you straight to Google to approve
+  it again. Nothing you have is lost — your tasks and history stay exactly as they are,
+  and updating simply resumes once you are back.
+</div>
+
+${button(url, `Reconnect Google`)}
+
+<div style="font-size:12.5px;line-height:1.6;color:${C.inkFaint};">
+  Or paste this into your browser: <span style="color:${C.brassDeep};">${url}</span>
+</div>
+
+<div style="margin-top:24px;padding-top:18px;border-top:1px solid ${C.line};font-size:12.5px;line-height:1.6;color:${C.inkFaint};">
+  You are getting this because the system noticed the connection drop on its own — you
+  do not need to tell anyone. If you meant to disconnect, you can ignore this.
+</div>`;
+
+  const text = [
+    hi,
+    '',
+    `Your Google connection to the Janelle Interiors workflow system has stopped working,`,
+    `so the system can no longer read your ${what}. This happens when Google asks for`,
+    `sign-in again — after a password change, or when access times out.`,
+    '',
+    `Reconnecting takes one tap — approve it again with Google here:`,
+    `  ${opts.url}`,
+    '',
+    `Nothing you have is lost. Your tasks and history stay exactly as they are, and`,
+    `updating resumes once you are back.`,
+    '',
+    `You are getting this because the system noticed the connection drop on its own. If`,
+    `you meant to disconnect, you can ignore this.`,
+    '',
+    ...FOOTER_TEXT,
+  ].join('\n');
+
+  return {
+    subject: 'Reconnect your Google account — Janelle Interiors',
+    text,
+    html: shell('Your Google connection needs to be reconnected.', body),
+  };
+}
+
 // ── The task reminders: morning priorities and an end-of-day check-in ──
 
 /**

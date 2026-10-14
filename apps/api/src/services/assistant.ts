@@ -3400,23 +3400,50 @@ async function runTool(
       const gmail = await session.google.gmail();
       const max = Math.min(Math.max(Number(input.max) || 10, 1), 20);
       const found = await googleCall(() => searchMessages(gmail, String(input.query ?? ''), max));
+
+      // Open the message in the BUILT-IN inbox whenever the system has it.
+      //
+      // A Gmail web permalink (mail.google.com/.../#all/<id>) leaves the app,
+      // and on a phone or an iPad it does not even reach the thread: mobile
+      // Gmail ignores the #all hash and shows the inbox, and the hard-coded
+      // u/0 opens whichever Google account is signed in first — the wrong one,
+      // or a personal mailbox, which is the "random home page" people land on.
+      // A message the system has ingested has a row here, and /inbox?open=<id>
+      // opens it in place on every device. Only mail that was never ingested
+      // falls back to Gmail, where nothing else can open it. Scoped by the
+      // caller's own client, so an id is only used for mail they may see.
+      const stored = new Map<string, string>();
+      if (found.length && ctx.orgId) {
+        const { data } = await db
+          .from('emails')
+          .select('id, gmail_id')
+          .in('gmail_id', found.map((m) => m.gmailId));
+        for (const r of (data ?? []) as { id: string; gmail_id: string | null }[]) {
+          if (r.gmail_id) stored.set(r.gmail_id, r.id);
+        }
+      }
+
       return {
         total: found.length,
-        messages: found.map((m) => ({
-          ref: refs.add('E', {
-            kind: 'email',
-            title: m.subject || '(no subject)',
-            detail: m.snippet || null,
-            url: gmailMessageUrl(m.gmailId),
-            fields: [field('From', addressOf(m.from)), field('Received', day(m.receivedAt))],
-          }),
-          message_id: m.gmailId,
-          from: m.from,
-          to: m.to,
-          subject: m.subject,
-          snippet: m.snippet,
-          received_at: m.receivedAt,
-        })),
+        messages: found.map((m) => {
+          const inApp = stored.get(m.gmailId) ?? null;
+          return {
+            ref: refs.add('E', {
+              kind: 'email',
+              title: m.subject || '(no subject)',
+              detail: m.snippet || null,
+              // In-app when we have it; the Gmail link only when we do not.
+              ...(inApp ? { id: inApp } : { url: gmailMessageUrl(m.gmailId) }),
+              fields: [field('From', addressOf(m.from)), field('Received', day(m.receivedAt))],
+            }),
+            message_id: m.gmailId,
+            from: m.from,
+            to: m.to,
+            subject: m.subject,
+            snippet: m.snippet,
+            received_at: m.receivedAt,
+          };
+        }),
       };
     }
 

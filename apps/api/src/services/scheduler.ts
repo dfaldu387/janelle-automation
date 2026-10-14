@@ -147,7 +147,10 @@ export function startScheduler(): void {
   // expires it — and a revoked one is found by this, not by a failed read.
   const keepalive = async () => {
     const r = await keepGoogleAlive();
-    console.log(`[google] keep-alive: ${r.healthy}/${r.checked} healthy, ${r.needReconnect} need reconnect, ${r.transient} retry later`);
+    console.log(
+      `[google] keep-alive: ${r.healthy}/${r.checked} healthy, ${r.needReconnect} need reconnect` +
+        `${r.reconnectEmails ? ` (${r.reconnectEmails} emailed to reconnect)` : ''}, ${r.transient} retry later`,
+    );
   };
   every('15 */6 * * *', 'google keep-alive', keepalive);
   void keepalive().catch((err) => console.error('[google] keep-alive failed:', (err as Error).message));

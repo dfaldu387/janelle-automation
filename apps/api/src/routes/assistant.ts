@@ -5,7 +5,7 @@ import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { ask, type AssistantContext, type AssistantTurn, type PendingProposal } from '../services/assistant.js';
 import { ProposalError, commitProposal } from '../services/proposals.js';
-import { buildBriefing, emptyBriefing } from '../services/briefing.js';
+import { buildBriefing, buildDigest, emptyBriefing } from '../services/briefing.js';
 import { CheckinError, buildCheckin, recordCheckin, type CheckinOutcome } from '../services/checkin.js';
 import { canManageTasks, canWith } from '@janelle/shared';
 import { MAX_RELAY_BYTES, UPLOAD_GRANT_TTL_MS, openFileGrant, sealFileGrant } from '../lib/fileTokens.js';
@@ -217,6 +217,21 @@ assistantRouter.get(
     const hour = Number.isInteger(hourRaw) && hourRaw >= 0 && hourRaw <= 23 ? hourRaw : null;
     if (!ctx.orgId) return res.json({ data: emptyBriefing(ctx.name, hour) });
     res.json({ data: await buildBriefing(ctx, { hour }) });
+  }),
+);
+
+/**
+ * This morning's digest, read straight back — the stored narrative and the
+ * tasks behind it, with NO model call. "Read me the digest" used to cost a
+ * whole assistant turn to recite something already written at 7am; this
+ * serves it like the briefing does, from the database.
+ */
+assistantRouter.get(
+  '/digest',
+  asyncHandler(async (req, res) => {
+    const ctx = await assistantContext(req);
+    if (!ctx.orgId) return res.json({ data: null });
+    res.json({ data: await buildDigest(ctx) });
   }),
 );
 

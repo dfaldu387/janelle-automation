@@ -7,7 +7,7 @@ import { hasSeatColumn, profileColumns } from '../lib/columns.js';
 import { env } from '../env.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { servicesGranted } from '../lib/google.js';
-import { latestGoogleHealth } from '../services/googleKeepalive.js';
+import { latestGoogleHealth } from '../lib/googleHealth.js';
 import { gmailFor, sendMessage } from '../services/gmail.js';
 import { inviteEmail } from '../services/emailTemplate.js';
 import crypto from 'node:crypto';

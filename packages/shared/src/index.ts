@@ -1315,6 +1315,15 @@ export const ASSISTANT_NAME = 'Jenny';
 export const CHECKIN_PROMPT = 'Do my end-of-day check-in';
 
 /**
+ * The other question the browser answers itself: it reads back the stored
+ * morning digest (GET /assistant/digest) rather than spending a whole Claude
+ * turn to fetch and paraphrase what was already written at 7am. Offered as a
+ * chip under the briefing to those who supervise, and typed by anyone who
+ * knows it.
+ */
+export const DIGEST_PROMPT = "Read me this morning's digest";
+
+/**
  * The named personas a person can switch Jenny to — narrowing her to one
  * job, the way separate bots in another tool each do one thing. Picking
  * none means the full, unrestricted assistant: today's default behaviour.
