@@ -589,17 +589,19 @@ export async function searchMessages(
 /**
  * Where a message opens in Gmail, for a person who wants the original.
  *
- * Targets the account by address (`?authuser=`) when the mailbox email is
- * known, so it opens the right account whatever its index is in the viewer's
- * Chrome profile — a shared studio mailbox is rarely the first account signed
- * in. Falls back to the first account (`/u/0/`) only when the address is
- * unknown (nothing connected yet, or before migration 0038).
+ * Routed through Google's account chooser, keyed to the mailbox address, so it
+ * never opens the WRONG inbox. `?authuser=` alone only targets the studio
+ * account when that account is already signed into the viewer's Chrome
+ * profile, and silently falls back to whatever account IS signed in otherwise.
+ * The chooser switches to the studio account when present, or shows a
+ * choose/sign-in screen (address filled in) when not — the right mailbox or an
+ * honest prompt, never a stranger's inbox. Falls back to the first-account
+ * form only when the address is unknown (nothing connected, or before 0038).
  */
 export function gmailMessageUrl(gmailId: string, mailboxEmail?: string | null): string {
-  const base = 'https://mail.google.com/mail/';
-  return mailboxEmail
-    ? `${base}?authuser=${encodeURIComponent(mailboxEmail)}#all/${gmailId}`
-    : `${base}u/0/#all/${gmailId}`;
+  if (!mailboxEmail) return `https://mail.google.com/mail/u/0/#all/${gmailId}`;
+  const inbox = `https://mail.google.com/mail/?authuser=${encodeURIComponent(mailboxEmail)}#all/${gmailId}`;
+  return `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(mailboxEmail)}&continue=${encodeURIComponent(inbox)}`;
 }
 
 /** Download a single PDF attachment's bytes. */

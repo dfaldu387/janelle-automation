@@ -9,6 +9,7 @@ import {
   type AssistantItemKind,
 } from '@janelle/shared';
 import { apiBlob } from '../lib/api';
+import { gmailHrefForDevice } from '../lib/queries';
 import { Markdown } from './Markdown';
 
 /**
@@ -338,7 +339,8 @@ function FileActions({ item }: { item: AssistantItem }) {
 
   const file = item.file ?? null;
   const where = file?.source === 'drive' ? 'Drive' : 'Gmail';
-  const elsewhere = file?.webUrl ?? item.url ?? null;
+  // Unwrapped to the direct Gmail deep link on mobile/iPad, so the app takes it.
+  const elsewhere = gmailHrefForDevice(file?.webUrl ?? item.url ?? null) || null;
   const canPreview = Boolean(file?.downloadable && PREVIEWABLE.has(file.mimeType));
 
   async function open() {
@@ -695,7 +697,7 @@ function PagePreview({ item, compact }: { item: AssistantItem; compact: boolean 
           {file.webUrl && (
             <>
               {' '}
-              <a href={file.webUrl} target="_blank" rel="noopener noreferrer" className="underline">
+              <a href={gmailHrefForDevice(file.webUrl)} target="_blank" rel="noopener noreferrer" className="underline">
                 Open in {where}
               </a>
             </>

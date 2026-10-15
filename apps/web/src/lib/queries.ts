@@ -763,18 +763,66 @@ export function useEmail(id: string | null) {
 }
 
 /**
+ * A phone or tablet, where a tapped Gmail link is handed to the Gmail app.
+ *
+ * Used to decide how "Open in Gmail" is built: a direct `mail.google.com` link
+ * is a universal/app link the OS routes into the app, but only on a real tap —
+ * the desktop account-chooser hop (accounts.google.com → redirect) is not a
+ * tap on a Gmail link, so it would keep a phone in the browser. iPadOS 13+
+ * reports itself as desktop Safari, so it is caught by its touch points.
+ */
+export function isMobileOrTablet(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPod|Android|iPad/i.test(ua)) return true;
+  return /Macintosh/.test(ua) && navigator.maxTouchPoints > 1; // iPadOS masquerading as a Mac
+}
+
+/**
+ * A Gmail/compose link made fit for THIS device.
+ *
+ * Server-built links (assistant file cards, source citations) come through as
+ * the desktop account-chooser form. On a phone or iPad that would stay in the
+ * browser, so the chooser is unwrapped back to its `continue` target — the
+ * direct `mail.google.com` link the Gmail app can take. On desktop, and for any
+ * link that is not a chooser, it is returned unchanged.
+ */
+export function gmailHrefForDevice(url: string | null | undefined): string {
+  const raw = url ?? '';
+  if (!isMobileOrTablet() || !raw.startsWith('https://accounts.google.com/AccountChooser')) return raw;
+  try {
+    const target = new URL(raw).searchParams.get('continue');
+    return target || raw;
+  } catch {
+    return raw;
+  }
+}
+
+/**
  * Where a message opens in the connected mailbox — never a fabricated compose.
  *
- * Targets the account by address (`?authuser=`) when the studio's Gmail is
- * known, so it opens the right account whatever its index is in the viewer's
- * Chrome profile. Falls back to the first account only when the address is
- * unknown.
+ * Device-aware, because the two goals pull against each other:
+ * - **Mobile / iPad:** a DIRECT Gmail deep link, so the OS hands it to the
+ *   Gmail app (universal/app link). The account chooser cannot open the app —
+ *   its accounts.google.com hop keeps a phone in the browser — so here the
+ *   account is targeted best-effort with `authuser` and the app-open wins.
+ * - **Desktop:** routed through Google's account chooser, keyed to the studio
+ *   address, so it NEVER opens the wrong inbox: `authuser` alone silently falls
+ *   back to whatever account is signed into the profile, while the chooser
+ *   switches to the studio account or shows a choose/sign-in prompt. There is
+ *   no Gmail app on desktop anyway, so nothing is lost.
+ *
+ * Falls back to the first-account form only when the address is unknown.
  */
 export function gmailMessageUrl(gmailId: string, mailboxEmail?: string | null): string {
-  const base = 'https://mail.google.com/mail/';
-  return mailboxEmail
-    ? `${base}?authuser=${encodeURIComponent(mailboxEmail)}#all/${gmailId}`
-    : `${base}u/0/#all/${gmailId}`;
+  const direct = mailboxEmail
+    ? `https://mail.google.com/mail/?authuser=${encodeURIComponent(mailboxEmail)}#all/${gmailId}`
+    : `https://mail.google.com/mail/u/0/#all/${gmailId}`;
+  // Mobile/iPad: the direct link so the Gmail app takes it.
+  if (isMobileOrTablet()) return direct;
+  // Desktop: the account chooser so the right mailbox always opens.
+  if (!mailboxEmail) return direct;
+  return `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(mailboxEmail)}&continue=${encodeURIComponent(direct)}`;
 }
 
 interface DocRow {
@@ -2083,6 +2131,35 @@ export function useSaveClaritySettings() {
     mutationFn: (patch: { projectId?: string | null; enabled?: boolean }) =>
       api<ClaritySettings>('/settings/clarity', { method: 'PUT', body: JSON.stringify(patch) }),
     onSuccess: (data) => qc.setQueryData(['clarity-settings'], data),
+  });
+}
+
+export type DriveFilingSettings = {
+  enabled: boolean;
+  senders: string[];
+  /** Whether the studio account has granted Drive write yet (GET only). */
+  canWrite?: boolean;
+};
+
+/** Document-organiser config — files attachment PDFs into Drive. Admin-only. */
+export function useDriveFilingSettings() {
+  return useQuery({
+    queryKey: ['drive-filing-settings'],
+    queryFn: () => api<DriveFilingSettings>('/settings/drive-filing'),
+  });
+}
+
+export function useSaveDriveFilingSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: { enabled?: boolean; senders?: string[] }) =>
+      api<DriveFilingSettings>('/settings/drive-filing', { method: 'PUT', body: JSON.stringify(patch) }),
+    onSuccess: (data) =>
+      qc.setQueryData(['drive-filing-settings'], (prev: DriveFilingSettings | undefined) => ({
+        // The PUT response has no canWrite; keep what the GET knew.
+        ...(prev ?? {}),
+        ...data,
+      })),
   });
 }
 

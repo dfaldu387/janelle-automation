@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Page, PageHeading, Card } from '../components/ui';
 import { RichTextEditor, toEditorHtml, htmlToPlainText } from '../components/RichTextEditor';
-import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, type DraftRow } from '../lib/queries';
+import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, isMobileOrTablet, type DraftRow } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
 
@@ -17,20 +17,28 @@ function parseDraft(text: string): { to: string; cc: string; body: string } {
 /**
  * Gmail's compose deep link. Opens a new message in the user's Gmail with
  * every field prefilled — nothing is sent until they press Send there.
+ *
+ * Routed through Google's account chooser when the studio address is known, so
+ * the compose opens in the studio account or prompts to sign into it — never
+ * silently in a stranger's account that happens to be signed into this Chrome
+ * profile (where `authuser=` alone would land it). Falls back to a plain
+ * compose when the address is unknown.
  */
 function gmailComposeUrl(
   d: { to: string; cc: string; subject: string; body: string },
   mailboxEmail?: string | null,
 ): string {
   const q = new URLSearchParams({ view: 'cm', fs: '1' });
-  // Open the compose in the studio's account, not whichever is first in this
-  // Chrome profile.
   if (mailboxEmail) q.set('authuser', mailboxEmail);
   if (d.to) q.set('to', d.to);
   if (d.cc) q.set('cc', d.cc);
   if (d.subject) q.set('su', d.subject);
   if (d.body) q.set('body', htmlToPlainText(d.body));
-  return `https://mail.google.com/mail/?${q.toString()}`;
+  const compose = `https://mail.google.com/mail/?${q.toString()}`;
+  // Mobile/iPad: the direct compose link so the Gmail app opens it. Desktop:
+  // the account chooser so the compose opens in the studio account.
+  if (isMobileOrTablet() || !mailboxEmail) return compose;
+  return `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(mailboxEmail)}&continue=${encodeURIComponent(compose)}`;
 }
 
 function ageFrom(iso: string): string {

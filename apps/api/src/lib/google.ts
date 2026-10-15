@@ -10,7 +10,21 @@ const GMAIL_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly',
   'https://www.googleapis.com/auth/gmail.compose', // drafts only — never sends
 ];
-const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
+/** Read every Drive file (search, download) — the long-standing baseline. */
+const DRIVE_READ = 'https://www.googleapis.com/auth/drive.readonly';
+/**
+ * Create and manage only the Drive files this app itself makes — the document
+ * organiser's filing tree. A narrow write grant: it can touch nothing it did
+ * not create, so it can never alter the studio's existing Drive.
+ */
+const DRIVE_WRITE = 'https://www.googleapis.com/auth/drive.file';
+/**
+ * Both are REQUESTED at consent, so re-granting picks up filing. Connection
+ * status keys on read alone (see `servicesGranted`), so an older read-only
+ * grant is not suddenly reported disconnected for lacking write — it keeps
+ * reading, and filing simply waits until that account re-consents.
+ */
+const DRIVE_SCOPES = [DRIVE_READ, DRIVE_WRITE];
 
 /** Scopes a given service needs. `GOOGLE_SCOPES` in .env can override the full set. */
 export function scopesFor(service: GoogleService | 'all'): string[] {
@@ -23,7 +37,15 @@ export function scopesFor(service: GoogleService | 'all'): string[] {
 export function servicesGranted(scopes: string | null | undefined): Record<GoogleService, boolean> {
   const granted = new Set((scopes ?? '').split(/\s+/).filter(Boolean));
   const has = (needed: string[]) => needed.every((s) => granted.has(s));
-  return { gmail: has(GMAIL_SCOPES), drive: has(DRIVE_SCOPES) };
+  // Drive counts as connected on READ alone: write is an add-on the filing
+  // feature checks for separately (`driveCanWrite`), never a reason to treat
+  // a working read-only grant as disconnected.
+  return { gmail: has(GMAIL_SCOPES), drive: granted.has(DRIVE_READ) };
+}
+
+/** Whether a grant can create/manage the app's own Drive files (`drive.file`). */
+export function driveCanWrite(scopes: string | null | undefined): boolean {
+  return new Set((scopes ?? '').split(/\s+/).filter(Boolean)).has(DRIVE_WRITE);
 }
 
 /** Build a fresh Google OAuth2 client from configured credentials. */
