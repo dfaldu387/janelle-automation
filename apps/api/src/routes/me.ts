@@ -5,6 +5,8 @@ import { servicesGranted } from '../lib/google.js';
 import { hasTaskComments, profileColumns } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { latestGoogleHealth } from '../lib/googleHealth.js';
+import { readClaritySettings } from '../lib/claritySettings.js';
+import { mailboxEmail } from '../lib/mailbox.js';
 import { RESOURCES, canWith } from '@janelle/shared';
 
 export const meRouter = Router();
@@ -48,6 +50,33 @@ meRouter.get(
     // applied. The client had no way to ask: it rendered every page to
     // everybody and found out on the 403. Now a module the role cannot view
     // simply is not offered.
+    // The Clarity project id, handed to every signed-in session so recording
+    // covers the whole team. Only the id travels — reading or changing it is
+    // admin-only, on the settings route. Null (and so nothing loads) unless an
+    // admin has set an id and left recording on. Never fails the whole call.
+    let clarity: { projectId: string } | null = null;
+    const orgId = req.auth!.orgId;
+    if (orgId) {
+      try {
+        const c = await readClaritySettings(orgId);
+        if (c.enabled && c.projectId) clarity = { projectId: c.projectId };
+      } catch (err) {
+        console.error('[me] clarity settings unreadable:', (err as Error).message);
+      }
+    }
+
+    // The Gmail account the studio's mail lives in, so "Open in Gmail" links
+    // can target it by address rather than a browser account index. Null until
+    // a mailbox has been read at least once; links then use the old form.
+    let gmailAccount: string | null = null;
+    if (orgId) {
+      try {
+        gmailAccount = await mailboxEmail(orgId);
+      } catch (err) {
+        console.error('[me] mailbox email unreadable:', (err as Error).message);
+      }
+    }
+
     const role = req.auth!.role;
     const access = Object.fromEntries(
       RESOURCES.map((resource) => [
@@ -65,6 +94,8 @@ meRouter.get(
       data: {
         profile,
         access,
+        clarity,
+        gmailAccount,
         google: {
           status: integrationError ? 'unknown' : integration?.status ?? 'disconnected',
           connected_at: integration?.connected_at ?? null,

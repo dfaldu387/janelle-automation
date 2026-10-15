@@ -318,6 +318,53 @@ function titleKey(title: string): string {
     .trim();
 }
 
+/** The distinct words of a title, sharing titleKey's normalisation. */
+function titleWords(title: string): Set<string> {
+  return new Set(titleKey(title).split(' ').filter(Boolean));
+}
+
+/**
+ * How alike two tasks are to each other, 0..1, by the share of words they
+ * have in common (Jaccard). An exact match scores 1.
+ *
+ * titleKey only flattens case, punctuation and spacing, so it sees one
+ * reworded ask as two: Claude writes the title fresh for every email, and
+ * "Send countertop and toilets quotes to Deb and Steve Lemon for approval"
+ * came back a day later as "Send countertop SLAB and toilets quotes…" — one
+ * piece of work, two rows on the board, neither dedup layer the wiser.
+ */
+function titleSimilarity(a: string, b: string): number {
+  const sa = titleWords(a);
+  const sb = titleWords(b);
+  if (!sa.size || !sb.size) return 0;
+  let shared = 0;
+  for (const w of sa) if (sb.has(w)) shared++;
+  const union = sa.size + sb.size - shared;
+  return union ? shared / union : 0;
+}
+
+/** Below this many distinct words a title is too thin to fuzzy-match safely. */
+const MIN_FUZZY_WORDS = 6;
+/** At or above this overlap, two long-enough titles are the same work. */
+const TITLE_SIM_THRESHOLD = 0.85;
+
+/**
+ * Whether two titles name the same piece of work.
+ *
+ * An exact normalised match always counts. Otherwise both titles must be
+ * long enough to carry meaning, and overlap heavily: a single added
+ * descriptor ("countertop" → "countertop slab", one extra word) clears the
+ * bar, while a swapped noun ("countertop" → "flooring", a word lost AND a
+ * word gained) falls below it and stays two tasks. Short titles — "Order
+ * rug" vs "Order lamp" — never fuzzy-match, where one word is the whole
+ * difference and a wrong merge would be worse than a repeat.
+ */
+function sameWork(a: string, b: string): boolean {
+  if (titleKey(a) === titleKey(b)) return true;
+  if (titleWords(a).size < MIN_FUZZY_WORDS || titleWords(b).size < MIN_FUZZY_WORDS) return false;
+  return titleSimilarity(a, b) >= TITLE_SIM_THRESHOLD;
+}
+
 /**
  * Document numbers a task names — a quote, order or PO reference such as
  * EX00043246. Claude words each task fresh, so "Follow up on updated quote
@@ -326,7 +373,7 @@ function titleKey(title: string): string {
  * title comparison never sees as the same.
  */
 function refsOf(...texts: (string | null | undefined)[]): string[] {
-  const found = texts.join(' ').toUpperCase().match(/[A-Z]{1,4}-?d{5,}|d{7,}/g) ?? [];
+  const found = texts.join(' ').toUpperCase().match(/\b[A-Z]{1,4}-?\d{5,}\b|\b\d{7,}\b/g) ?? [];
   return [...new Set(found.map((r) => r.replace('-', '')))];
 }
 
@@ -381,18 +428,26 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
 
   const tasks = (data ?? []) as DuplicateTaskRow[];
 
-  // Same wording AND same project. Two jobs may each need "Chase the vendor
-  // for a quote", and those are two real tasks.
-  const groups = new Map<string, DuplicateTaskRow[]>();
+  // Same work AND same project. Two jobs may each need "Chase the vendor for
+  // a quote", and those are two real tasks — so the project must match. Within
+  // a project, titles are clustered by sameWork, not an exact key: the board
+  // already holds reworded copies ("countertop" / "countertop slab") that an
+  // exact-string group would leave side by side. Clustering is greedy against
+  // the oldest member of each cluster (tasks arrive oldest-first); a handful of
+  // live tasks per job makes the pairwise pass cheap.
+  const clusters: DuplicateTaskRow[][] = [];
   for (const t of tasks) {
-    const key = `${t.project_id ?? 'none'}::${titleKey(t.title)}`;
-    groups.set(key, [...(groups.get(key) ?? []), t]);
+    const home = clusters.find(
+      (c) => (c[0].project_id ?? null) === (t.project_id ?? null) && sameWork(c[0].title, t.title),
+    );
+    if (home) home.push(t);
+    else clusters.push([t]);
   }
 
   const result: TaskDedupe = { ok: true, removed: 0, merged: [] };
   const deleted = new Set<string>();
 
-  for (const group of groups.values()) {
+  for (const group of clusters) {
     if (group.length < 2) continue;
 
     // The most complete copy survives; the oldest breaks a tie, being the
@@ -1622,15 +1677,16 @@ export async function createTaskFromEmail(
     .eq('org_id', orgId)
     .or(`status.in.(${LIVE_STATUSES.join(',')}),and(status.in.(done,cancelled),updated_at.gte.${finishedSince})`);
 
-  const wanted = titleKey(title);
   const projectOf = projectId;
-  // Same ask on the same job — or on a job and on nothing. A reply that
+  // Same work on the same job — or on a job and on nothing. A reply that
   // arrives before the project exists files the first copy nowhere, and
   // requiring the projects to be equal let the second one in beside it.
-  // Two DIFFERENT projects are still two jobs.
+  // Two DIFFERENT projects are still two jobs. Titles are compared by
+  // sameWork, not an exact key, so Claude rewording the ask on the next
+  // email ("countertop" → "countertop slab") no longer raises a second card.
   const already = (liveSame ?? []).some((row) => {
     const r = row as { title: string; project_id: string | null };
-    if (titleKey(r.title) !== wanted) return false;
+    if (!sameWork(r.title, title)) return false;
     return r.project_id === projectOf || r.project_id === null || projectOf === null;
   });
   if (already) return false;

@@ -79,7 +79,20 @@ export interface DocView {
   createdAt: string;
   source: DocSource | null;
 }
-export interface ActivityView { id: string; action: string; detail: string; when: string }
+export interface ActivityView {
+  id: string;
+  action: string;
+  entity: string | null;
+  /** The raw meta, so the page can phrase it rather than dump key:value. */
+  meta: Record<string, unknown> | null;
+  /** Who did it — null means the system/automation. */
+  actorId: string | null;
+  actorName: string | null;
+  /** ISO timestamp, for an exact time and tooltip. */
+  at: string;
+  /** A coarse "today / N days" age, kept for compatibility. */
+  when: string;
+}
 
 export function ageFrom(iso: string | null): string {
   if (!iso) return '—';
@@ -749,9 +762,19 @@ export function useEmail(id: string | null) {
   });
 }
 
-/** Where a message opens in the connected mailbox — never a fabricated compose. */
-export function gmailMessageUrl(gmailId: string): string {
-  return `https://mail.google.com/mail/u/0/#all/${gmailId}`;
+/**
+ * Where a message opens in the connected mailbox — never a fabricated compose.
+ *
+ * Targets the account by address (`?authuser=`) when the studio's Gmail is
+ * known, so it opens the right account whatever its index is in the viewer's
+ * Chrome profile. Falls back to the first account only when the address is
+ * unknown.
+ */
+export function gmailMessageUrl(gmailId: string, mailboxEmail?: string | null): string {
+  const base = 'https://mail.google.com/mail/';
+  return mailboxEmail
+    ? `${base}?authuser=${encodeURIComponent(mailboxEmail)}#all/${gmailId}`
+    : `${base}u/0/#all/${gmailId}`;
 }
 
 interface DocRow {
@@ -793,15 +816,41 @@ export function useDocuments() {
   return { ...q, data: q.data ?? [] };
 }
 
-interface ActivityRow { id: string; action: string; meta: Record<string, unknown> | null; created_at: string }
-export function useActivity() {
+interface ActivityRow {
+  id: string;
+  action: string;
+  entity: string | null;
+  meta: Record<string, unknown> | null;
+  created_at: string;
+  actor: string | null;
+  profiles: { full_name: string | null } | null;
+}
+
+/** Narrow the trail: everyone, just people, just the system, or one person. */
+export type ActivityFilters = { scope?: 'all' | 'people' | 'system'; actor?: string | null };
+
+/**
+ * The audit trail, with the raw meta kept so the page can phrase each row,
+ * and the actor resolved to a name (null = the system/automation did it).
+ */
+export function useActivity(filters: ActivityFilters = {}) {
+  const scope = filters.actor ? 'all' : filters.scope ?? 'all';
   const q = useQuery({
-    queryKey: ['activity'],
+    queryKey: ['activity', scope, filters.actor ?? null],
     queryFn: async (): Promise<ActivityView[]> => {
-      const rows = await api<ActivityRow[]>('/activity');
+      const params = new URLSearchParams();
+      if (filters.actor) params.set('actor', filters.actor);
+      else if (scope !== 'all') params.set('scope', scope);
+      const qs = params.toString();
+      const rows = await api<ActivityRow[]>(`/activity${qs ? `?${qs}` : ''}`);
       return rows.map((r) => ({
-        id: r.id, action: r.action,
-        detail: r.meta ? Object.entries(r.meta).map(([k, v]) => `${k}: ${v}`).join(', ') : '',
+        id: r.id,
+        action: r.action,
+        entity: r.entity,
+        meta: r.meta ?? null,
+        actorId: r.actor,
+        actorName: r.profiles?.full_name ?? null,
+        at: r.created_at,
         when: ageFrom(r.created_at),
       }));
     },
@@ -2015,6 +2064,25 @@ export function useSaveSla() {
       // The board's due dates are computed from these.
       qc.invalidateQueries({ queryKey: ['dashboard'] });
     },
+  });
+}
+
+export type ClaritySettings = { projectId: string | null; enabled: boolean };
+
+/** Microsoft Clarity session-replay config. Admin-only endpoint. */
+export function useClaritySettings() {
+  return useQuery({
+    queryKey: ['clarity-settings'],
+    queryFn: () => api<ClaritySettings>('/settings/clarity'),
+  });
+}
+
+export function useSaveClaritySettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: { projectId?: string | null; enabled?: boolean }) =>
+      api<ClaritySettings>('/settings/clarity', { method: 'PUT', body: JSON.stringify(patch) }),
+    onSuccess: (data) => qc.setQueryData(['clarity-settings'], data),
   });
 }
 

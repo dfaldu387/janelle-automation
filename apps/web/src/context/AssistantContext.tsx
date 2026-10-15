@@ -275,6 +275,12 @@ interface Stored {
   v: 2 | 3;
   conversations: Conversation[];
   activeId: string;
+  /**
+   * The local day this store belongs to. On a new day the conversations are
+   * cleared on load (see `forToday`) so Jenny always opens on a clean slate —
+   * yesterday's chat is not carried over.
+   */
+  activeDay?: string | null;
   /** The local day the last briefing was made, so there is one a day. */
   briefedOn: string | null;
   /** The local day the end-of-day check-in was last offered, so there is one a day. */
@@ -326,8 +332,21 @@ const allAgents = (): AgentKey[] => [...AGENT_KEYS];
 
 const emptyStore = (): Stored => {
   const first = blankConversation();
-  return { v: 3, conversations: [first], activeId: first.id, briefedOn: null, checkedInOn: null, unseen: 0, agents: allAgents() };
+  return { v: 3, conversations: [first], activeId: first.id, activeDay: localDay(), briefedOn: null, checkedInOn: null, unseen: 0, agents: allAgents() };
 };
+
+/**
+ * A store brought up to today.
+ *
+ * Jenny starts every day clean — yesterday's chat is not kept. When the stored
+ * day is not today's, the conversations, active tab, briefing and check-in all
+ * reset; only the per-person agent choice is carried over, since it is a
+ * setting, not a conversation. Same-day stores are returned untouched.
+ */
+function forToday(s: Stored): Stored {
+  if (s.activeDay === localDay()) return s;
+  return { ...emptyStore(), agents: s.agents };
+}
 
 /** The conversation on screen; there is always one. */
 const activeOf = (s: Stored): Conversation =>
@@ -355,7 +374,7 @@ function load(userId: string): Stored {
         updatedAt: messages[messages.length - 1]?.at ?? Date.now(),
         messages,
       };
-      return { v: 3, conversations: [conversation], activeId: conversation.id, briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0, agents: allAgents() };
+      return forToday({ v: 3, conversations: [conversation], activeId: conversation.id, activeDay: localDay(), briefedOn: parsed.briefedOn ?? null, unseen: parsed.unseen ?? 0, agents: allAgents() });
     }
     if ((parsed?.v !== 2 && parsed?.v !== 3) || !Array.isArray(parsed.conversations) || !parsed.conversations.length) return emptyStore();
     const conversations = parsed.conversations.filter((c) => c && typeof c.id === 'string' && Array.isArray(c.messages));
@@ -369,7 +388,7 @@ function load(userId: string): Stored {
      * as v3 and left alone.
      */
     const agents = parsed.v === 2 && !agentsOf(parsed.agents).length ? allAgents() : agentsOf(parsed.agents);
-    return { ...parsed, v: 3, conversations, activeId, agents };
+    return forToday({ ...parsed, v: 3, conversations, activeId, agents });
   } catch {
     return emptyStore();
   }

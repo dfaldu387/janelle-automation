@@ -3,6 +3,7 @@ import { Avatar, CategoryTag, ProjectName } from '../components/hue';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Page, PageHeading, Card, Pill, money, shortDate } from '../components/ui';
 import { useEmails, useEmail, useDocuments, gmailMessageUrl, type DocSource } from '../lib/queries';
+import { useAuth } from '../context/AuthContext';
 import { apiBlob } from '../lib/api';
 import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
 import { TASK_CATEGORIES, TASK_CATEGORY_LABELS } from '@janelle/shared';
@@ -53,6 +54,7 @@ function exactWhen(iso: string): string | undefined {
 }
 
 export function Inbox() {
+  const { gmailAccount } = useAuth();
   const { data: emails, isLoading } = useEmails();
   const [query, setQuery] = useState('');
   const [cls, setCls] = useState<string>('all');
@@ -184,7 +186,7 @@ export function Inbox() {
                 </p>
                 {openedEmail.gmailId && (
                   <a
-                    href={gmailMessageUrl(openedEmail.gmailId)}
+                    href={gmailMessageUrl(openedEmail.gmailId, gmailAccount)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="focusable mt-2 inline-block text-[12.5px] font-semibold text-brass-deep hover:underline"
@@ -346,7 +348,7 @@ export function Inbox() {
                           <div className="mt-2 flex flex-wrap items-center gap-3">
                             {m.gmailId ? (
                               <a
-                                href={gmailMessageUrl(m.gmailId)}
+                                href={gmailMessageUrl(m.gmailId, gmailAccount)}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 onClick={(e) => e.stopPropagation()}

@@ -7,7 +7,8 @@ import {
   type AssistantAnswer,
   type AssistantItem,
 } from '@janelle/shared';
-import { purchaseOrderRow, taskRow, type AssistantContext } from './assistant.js';
+import { taskRow, type AssistantContext } from './assistant.js';
+import { pacificDate } from '../lib/pacificTime.js';
 
 /**
  * The briefing Jenny opens with: what needs THIS person, today.
@@ -30,18 +31,6 @@ const LIVE = ['open', 'in_progress', 'blocked'];
 
 /** How many rows of one kind the briefing shows before counting the rest. */
 const SHOW = { overdue: 5, dueToday: 3, latePos: 4, unassigned: 5, inProgress: 4, open: 4 };
-
-type Db = AssistantContext['db'];
-
-/** A count query that reports null rather than throwing — a briefing degrades, it does not fail. */
-async function count(build: () => PromiseLike<{ count: number | null; error: unknown }>): Promise<number> {
-  try {
-    const { count: n, error } = await build();
-    return error ? 0 : (n ?? 0);
-  } catch {
-    return 0;
-  }
-}
 
 async function rowsOf<T>(build: () => PromiseLike<{ data: unknown; error: unknown }>): Promise<T[]> {
   try {
@@ -67,11 +56,6 @@ function greeting(hour: number | null): string {
 const daysLate = (isoDay: string) =>
   Math.max(1, Math.floor((Date.now() - new Date(`${isoDay}T12:00:00Z`).getTime()) / 86400_000));
 
-/** A line that stands for a count and opens the screen that holds the rows. */
-function summaryRow(kind: AssistantItem['kind'], title: string, tone: AssistantItem['tone']): AssistantItem {
-  return { kind, title, tone };
-}
-
 interface BriefingOptions {
   /** The person's local hour, 0–23, for the greeting. The server does not know their timezone. */
   hour?: number | null;
@@ -80,7 +64,8 @@ interface BriefingOptions {
 export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions = {}): Promise<AssistantAnswer> {
   const { db, userId, role } = ctx;
   const seat = ctx.seat ?? null;
-  const today = new Date().toISOString().slice(0, 10);
+  // The studio's own calendar day, not the server's UTC one.
+  const today = pacificDate();
   const first = ctx.name.split(/[\s@]/)[0] || ctx.name;
 
   // What each seat exists to catch. The rest of the studio's troubles belong
@@ -89,204 +74,100 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
   const supervises = canSupervise(role);
   const watchesOrders = role === 'procurement' || role === 'coordinator';
   const watchesSpecs = role === 'designer';
-  const chasesHygiene = runsBoard || seat === 'pm_support';
 
-  const head = (table: string) => (db as Db).from(table).select('*', { count: 'exact', head: true });
-
-  type TaskRowData = {
+  type Row = {
     id: string; title: string; status: string; due_date: string | null;
-    projects: { name: string } | null;
-  };
-  type PoRowData = {
-    id: string; po_number: string | null; status: string; amount: number | null; eta: string | null;
-    vendors: { name: string } | null; projects: { name: string } | null;
-  };
-
-  type BoardRowData = TaskRowData & {
-    kind: string;
     next_step: string | null;
+    projects: { name: string } | null;
     profiles: { full_name: string | null } | null;
   };
 
-  const [mine, board, noNextStep, drafts, escalations, clientsWaiting, latePos, specGaps] = await Promise.all([
-    rowsOf<TaskRowData>(() =>
-      db
-        .from('tasks')
-        .select('id, title, status, due_date, projects(name)')
-        .eq('assigned_to', userId)
-        .in('status', LIVE)
-        .order('due_date', { ascending: true, nullsFirst: false })
-        .limit(60),
-    ),
-    // The live board, not just this person's own row of it.
-    //
-    // A principal owns almost nothing on the board — the work is assigned to
-    // the people who do it — so a briefing built only from `assigned_to = me`
-    // told whoever runs the studio that nothing needed them, while eleven
-    // live tasks sat there and one of them had no owner at all. Whoever runs
-    // the board is briefed on the board.
-    runsBoard
-      ? rowsOf<BoardRowData>(() =>
-          db
-            .from('tasks')
-            .select('id, title, kind, status, due_date, next_step, projects(name), profiles(full_name)')
-            .in('status', LIVE)
-            .order('due_date', { ascending: true, nullsFirst: false })
-            .limit(80),
-        )
-      : Promise.resolve([] as BoardRowData[]),
-    chasesHygiene
-      ? rowsOf<{ next_step: string | null }>(() => db.from('tasks').select('next_step').in('status', LIVE)).then(
-          (r) => r.filter((t) => !(t.next_step ?? '').trim()).length,
-        )
-      : Promise.resolve(0),
-    supervises ? count(() => head('drafts')) : Promise.resolve(0),
-    supervises
-      ? count(() => head('follow_ups').eq('type', 'task_escalation').in('status', ['open', 'drafted']))
-      : Promise.resolve(0),
-    role === 'principal'
-      ? count(() =>
-          head('follow_ups').in('type', ['client_approval_overdue', 'client_waiting']).in('status', ['open', 'drafted']),
-        )
-      : Promise.resolve(0),
-    watchesOrders
-      ? rowsOf<PoRowData>(() =>
-          db
-            .from('purchase_orders')
-            .select('id, po_number, status, amount, eta, vendors(name), projects(name)')
-            .lt('eta', today)
-            .not('status', 'in', '("received","cancelled")')
-            .order('eta', { ascending: true })
-            .limit(20),
-        )
-      : Promise.resolve([] as PoRowData[]),
-    watchesSpecs ? count(() => head('spec_gaps').eq('resolved', false)) : Promise.resolve(0),
-  ]);
+  // The pool a briefing is drawn from: the whole live board for whoever runs
+  // it (a principal owns almost nothing themselves), otherwise this person's
+  // own live tasks. Ordered earliest-due first, so the overdue list already
+  // runs most-late first.
+  const pool = await rowsOf<Row>(() => {
+    const q = db
+      .from('tasks')
+      .select('id, title, status, due_date, next_step, projects(name), profiles(full_name)')
+      .in('status', LIVE);
+    return (runsBoard ? q : q.eq('assigned_to', userId))
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .limit(200);
+  });
 
-  const overdue = mine.filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked');
-  const dueToday = mine.filter((t) => t.due_date === today && t.status !== 'blocked');
+  const overdue = pool.filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked');
+  const dueToday = pool.filter((t) => t.due_date === today && t.status !== 'blocked');
+  // The one thing carried over from before — "yesterday's top priority".
+  const topPriority = overdue[0] ?? null;
 
-  // The board, split the way the board is read. Anything already listed as
-  // this person's own is left out rather than said twice.
-  const alreadyShown = new Set([...overdue.slice(0, SHOW.overdue), ...dueToday.slice(0, SHOW.dueToday)].map((t) => t.id));
-  const boardRest = board.filter((t) => !alreadyShown.has(t.id));
-  const unassigned = boardRest.filter((t) => !t.profiles?.full_name);
-  const inProgress = boardRest.filter((t) => t.status === 'in_progress' && t.profiles?.full_name);
-  const openTasks = boardRest.filter((t) => t.status === 'open' && t.profiles?.full_name);
-
-  /** A board row, with the owner named and the next step spelled out. */
-  const asBoardTask = (t: BoardRowData): AssistantItem => {
+  // A task tile: the owner named for a board-runner, dropped for one's own
+  // list (it would just repeat their name), and the next step always carried
+  // so the renderer can line the cards up.
+  const asTile = (t: Row, meta?: string, tone?: AssistantItem['tone']): AssistantItem => {
     const row = taskRow({
       id: t.id,
       title: t.title,
       status: t.status,
       due_date: t.due_date,
-      owner: t.profiles?.full_name ?? 'Nobody yet',
+      owner: runsBoard ? t.profiles?.full_name ?? 'Nobody yet' : ctx.name,
       project: t.projects?.name ?? null,
     });
-    // The studio's SOP says a task names its next action, and that is the
-    // useful line — it is what the person would otherwise open the task to
-    // find. Always present, even when empty: the renderer only lays these
-    // out as a table when every row carries the same columns, and an em
-    // dash is dropped from the card view anyway.
-    const next = (t.next_step ?? '').trim();
-    return {
-      ...row,
-      fields: [...(row.fields ?? []), { label: 'Next', value: next || '—' }],
-    };
+    const base = runsBoard
+      ? [...(row.fields ?? []), { label: 'Next', value: (t.next_step ?? '').trim() || '—' }]
+      : (row.fields ?? []).filter((f) => f.label !== 'Owner');
+    return { ...row, fields: base, ...(meta ? { meta } : {}), ...(tone ? { tone } : {}) };
   };
 
-  // Every one of these is theirs, so an Owner column would repeat their own
-  // name down the whole list.
-  const asTask = (t: TaskRowData) => {
-    const row = taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: ctx.name, project: t.projects?.name ?? null });
-    return { ...row, fields: row.fields?.filter((f) => f.label !== 'Owner') };
+  // Yesterday's top priority, then today's tasks — and nothing else. The
+  // briefing is a short list of what today needs, not the backlog; capped so
+  // it stays a glance.
+  const MAX_TILES = 5;
+  const picked: Row[] = [];
+  const add = (t: Row | null) => {
+    if (t && !picked.some((x) => x.id === t.id) && picked.length < MAX_TILES) picked.push(t);
   };
+  add(topPriority);
+  dueToday.forEach(add);
 
-  const items: AssistantItem[] = [
-    ...overdue.slice(0, SHOW.overdue).map(asTask),
-    ...dueToday.slice(0, SHOW.dueToday).map((t) => ({ ...asTask(t), meta: 'due today', tone: 'warn' as const })),
-    ...latePos.slice(0, SHOW.latePos).map((p) =>
-      purchaseOrderRow({
-        id: p.id,
-        po: p.po_number,
-        vendor: p.vendors?.name ?? 'Unknown vendor',
-        project: p.projects?.name ?? 'Unassigned',
-        amount: p.amount,
-        expected: p.eta,
-        status: p.status,
-        late: true,
-      }),
-    ),
-  ];
+  const items: AssistantItem[] = picked.map((t) => {
+    const late = t.due_date && t.due_date < today ? `${daysLate(t.due_date)}d late` : null;
+    if (t.id === topPriority?.id) return asTile(t, late ?? (t.status === 'blocked' ? 'blocked' : 'top priority'), 'crit');
+    if (t.due_date === today) return asTile(t, 'due today', 'warn');
+    return asTile(t, late ?? undefined);
+  });
 
-  // Counts that stand for a whole screen. Worst first: people waiting on
-  // the studio, then work that has stalled, then the routine.
-  if (clientsWaiting) items.push(summaryRow('follow_up', `${plural(clientsWaiting, 'client is', 'clients are')} waiting on the studio`, 'crit'));
-  if (escalations) items.push(summaryRow('follow_up', `${plural(escalations, 'escalation', 'escalations')} to look at`, 'crit'));
-
-  // Needing an owner comes before anything in flight: it is the only one
-  // where nothing at all is happening until this person acts.
-  items.push(
-    ...unassigned.slice(0, SHOW.unassigned).map((t) => ({ ...asBoardTask(t), meta: 'needs an owner', tone: 'warn' as const })),
-    ...inProgress.slice(0, SHOW.inProgress).map((t) => ({ ...asBoardTask(t), meta: 'in progress' })),
-    ...openTasks.slice(0, SHOW.open).map((t) => ({ ...asBoardTask(t), meta: 'open' })),
-  );
-  if (noNextStep) items.push(summaryRow('task', `${plural(noNextStep, 'task is', 'tasks are')} missing a next step`, 'neutral'));
-  if (specGaps) items.push(summaryRow('project', `${plural(specGaps, 'spec gap is', 'spec gaps are')} still open`, 'warn'));
-  if (drafts) items.push(summaryRow('draft', `${plural(drafts, 'draft is', 'drafts are')} ready to review and send`, 'neutral'));
-
-  const hidden =
-    Math.max(0, overdue.length - SHOW.overdue) +
-    Math.max(0, dueToday.length - SHOW.dueToday) +
-    Math.max(0, latePos.length - SHOW.latePos) +
-    Math.max(0, unassigned.length - SHOW.unassigned) +
-    Math.max(0, inProgress.length - SHOW.inProgress) +
-    Math.max(0, openTasks.length - SHOW.open);
-
-  // "Things", counted as a person would: each late task is one, each
-  // count row is one — five drafts waiting is one thing to go and do.
-  //
-  // Work in flight is not counted. It is listed because whoever runs the
-  // board should see it, but a task someone else is already doing is not a
-  // thing that needs this person today, and counting it would turn a
-  // truthful "two things" into an alarming and meaningless thirteen.
-  const things =
-    overdue.length + dueToday.length + latePos.length + unassigned.length + items.filter((i) => !i.id).length;
+  const hidden = Math.max(0, dueToday.length + overdue.length - picked.length);
   const hello = `${greeting(opts.hour ?? null)}, ${first}.`;
 
   let lead: string;
-  let speech: string;
-  if (things === 0) {
-    lead = `${hello} Nothing needs you right now.`;
-    speech = `${hello} Nothing needs you right now.`;
+  if (!dueToday.length && !topPriority) {
+    lead = `${hello} Nothing needs you today.`;
   } else {
-    const worst = overdue[0];
-    const lateBy = worst?.due_date && worst.due_date < today ? `, ${plural(daysLate(worst.due_date), 'day', 'days')} late` : '';
-    const pressing = worst
-      ? ` The most pressing is “${worst.title}”${worst.status === 'blocked' ? ', which is blocked' : lateBy}.`
-      : latePos[0]
-        ? ` The most pressing is ${latePos[0].po_number ?? 'an order'} from ${latePos[0].vendors?.name ?? 'a vendor'}, past its delivery date.`
-        : unassigned.length
-          ? ` ${plural(unassigned.length, 'task has', 'tasks have')} nobody on ${unassigned.length === 1 ? 'it' : 'them'} — “${unassigned[0].title}” first.`
-          : '';
-    lead = `${hello} ${spoken(things)} ${things === 1 ? 'thing needs' : 'things need'} you today.${pressing}`;
-    speech = lead.replace(/[“”]/g, '');
+    const todayBit = dueToday.length
+      ? `${spoken(dueToday.length)} ${dueToday.length === 1 ? 'task is' : 'tasks are'} due today.`
+      : 'Nothing new is due today.';
+    const priorityBit = topPriority
+      ? ` Your top priority is still “${topPriority.title}”${
+          topPriority.status === 'blocked'
+            ? ', blocked'
+            : topPriority.due_date && topPriority.due_date < today
+              ? `, ${plural(daysLate(topPriority.due_date), 'day', 'days')} late`
+              : ''
+        }.`
+      : '';
+    lead = `${hello} ${todayBit}${priorityBit}`;
   }
+  const speech = lead.replace(/[“”]/g, '');
 
   const suggestions: string[] = [];
   // After four, the day's question is not what to start but what got done.
-  // The chip is answered by the browser (AssistantContext) with the
-  // check-in itself, not sent to the model.
-  if ((opts.hour ?? -1) >= 16 && (overdue.length || dueToday.length)) suggestions.push(CHECKIN_PROMPT);
-  if (overdue.length || dueToday.length) suggestions.push('What should I tackle first?');
+  if ((opts.hour ?? -1) >= 16 && (dueToday.length || topPriority)) suggestions.push(CHECKIN_PROMPT);
+  if (dueToday.length || topPriority) suggestions.push('What should I tackle first?');
   if (role === 'principal') suggestions.push('What are clients waiting on?');
   if (supervises) suggestions.push(DIGEST_PROMPT);
   if (watchesOrders) suggestions.push('Which orders are late, and who do I chase?');
   if (watchesSpecs) suggestions.push('Which spec gaps are blocking orders?');
-  if (unassigned.length) suggestions.push('Who should take the unassigned tasks?');
-  if (inProgress.length) suggestions.push("What's in progress right now?");
-  if (chasesHygiene && noNextStep) suggestions.push('Which tasks are missing a next step?');
   suggestions.push("What's on my plate this week?");
 
   return {
@@ -295,12 +176,7 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
     more: hidden,
     caveat: null,
     speech,
-    sources: [
-      'your tasks',
-      ...(board.length ? ['the task board'] : []),
-      ...(latePos.length ? ['purchase orders'] : []),
-      ...(drafts ? ['drafts'] : []),
-    ],
+    sources: ['today’s tasks', ...(items.length ? ['the task board'] : [])],
     suggestions: [...new Set(suggestions)].slice(0, 3),
   };
 }
@@ -317,16 +193,14 @@ export async function buildBriefing(ctx: AssistantContext, opts: BriefingOptions
  */
 export async function buildDigest(ctx: AssistantContext): Promise<AssistantAnswer> {
   const { db } = ctx;
-  const today = new Date().toISOString().slice(0, 10);
+  // The studio's own day, not the server's: in Pacific "today" rolls over at
+  // local midnight, where UTC would already be on tomorrow by late afternoon.
+  const today = pacificDate();
 
-  type DigestRow = { digest_date: string; narrative: string | null };
-  const digest = (
-    await rowsOf<DigestRow>(() =>
-      db.from('digests').select('digest_date, narrative').order('digest_date', { ascending: false }).limit(1),
-    )
-  )[0];
-
-  // The tasks behind the narrative, live, so each one opens straight through.
+  // Today's tasks only — the digest is a view of what is on for today, not the
+  // backlog. Overdue, blocked and stale work still drive the Slack reports, the
+  // owner emails and the principal's escalations; here it is deliberately left
+  // out so Jenny opens on today and nothing older.
   type LiveTask = {
     id: string; title: string; status: string; due_date: string | null; assigned_to: string | null;
     profiles: { full_name: string | null } | null; projects: { name: string } | null;
@@ -336,43 +210,40 @@ export async function buildDigest(ctx: AssistantContext): Promise<AssistantAnswe
       .from('tasks')
       .select('id, title, status, due_date, assigned_to, profiles(full_name), projects(name)')
       .in('status', LIVE)
+      .eq('due_date', today)
       .order('due_date', { ascending: true, nullsFirst: false })
       .limit(200),
   );
 
   const ownerOf = (t: LiveTask) => t.profiles?.full_name ?? 'Unassigned';
-  const overdue = live.filter((t) => (t.due_date && t.due_date < today) || t.status === 'blocked');
-  const shown = new Set(overdue.slice(0, SHOW.overdue).map((t) => t.id));
-  const unassigned = live.filter((t) => !t.assigned_to && !shown.has(t.id));
+  const dueToday = live;
+  const unassigned = dueToday.filter((t) => !t.assigned_to);
 
-  const items: AssistantItem[] = [
-    ...overdue
-      .slice(0, SHOW.overdue)
-      .map((t) => taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: ownerOf(t), project: t.projects?.name ?? null })),
-    ...unassigned.slice(0, SHOW.unassigned).map((t) => ({
-      ...taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: 'Nobody yet', project: t.projects?.name ?? null }),
-      meta: 'needs an owner',
-      tone: 'warn' as const,
-    })),
-  ];
+  const items: AssistantItem[] = dueToday.slice(0, SHOW.dueToday + SHOW.unassigned).map((t) =>
+    t.assigned_to
+      ? taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: ownerOf(t), project: t.projects?.name ?? null })
+      : {
+          ...taskRow({ id: t.id, title: t.title, status: t.status, due_date: t.due_date, owner: 'Nobody yet', project: t.projects?.name ?? null }),
+          meta: 'needs an owner',
+          tone: 'warn' as const,
+        },
+  );
 
-  const narrative = (digest?.narrative ?? '').trim();
-  const bits: string[] = [];
-  if (overdue.length) bits.push(`${plural(overdue.length, 'task is', 'tasks are')} overdue`);
-  if (unassigned.length) bits.push(`${plural(unassigned.length, 'task is', 'tasks are')} unassigned`);
-  const lead =
-    narrative ||
-    (bits.length ? `${bits.join(', ')}.` : `Nothing overdue this morning. ${plural(live.length, 'task', 'tasks')} open.`);
+  const lead = dueToday.length
+    ? `${plural(dueToday.length, 'task is', 'tasks are')} due today${
+        unassigned.length ? `, ${unassigned.length} with no owner yet` : ''
+      }.`
+    : 'Nothing due today.';
 
-  const hidden = Math.max(0, overdue.length - SHOW.overdue) + Math.max(0, unassigned.length - SHOW.unassigned);
+  const hidden = Math.max(0, dueToday.length - (SHOW.dueToday + SHOW.unassigned));
 
   return {
     lead,
     items,
     more: hidden,
-    caveat: digest ? null : 'No digest has run yet today — this is built live from the same data.',
+    caveat: null,
     speech: lead.replace(/[“”]/g, ''),
-    sources: ['the morning digest', ...(items.length ? ['the task board'] : [])],
+    sources: ['today’s tasks', ...(items.length ? ['the task board'] : [])],
     suggestions: [],
   };
 }

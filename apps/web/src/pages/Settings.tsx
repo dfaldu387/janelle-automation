@@ -51,6 +51,8 @@ import {
   useSetAiModel,
   useIngestSettings,
   useSetIngestSettings,
+  useClaritySettings,
+  useSaveClaritySettings,
   useRevokeUsageLink,
   useRotateUsageLink,
   useUsageLink,
@@ -1341,6 +1343,94 @@ function AiUsageLinkCard() {
   );
 }
 
+/**
+ * Microsoft Clarity — session replays and heatmaps of the team's own use of
+ * the app, for whoever runs the studio. Admin-only: this card is only reached
+ * from the Studio tab, which answers 403 to anyone who cannot change settings.
+ * To the people being recorded there is no sign of it; the tag loads silently
+ * once an id is set and left on.
+ */
+function ClarityCard() {
+  const settings = useClaritySettings();
+  const save = useSaveClaritySettings();
+  const [draft, setDraft] = useState<string | null>(null);
+
+  if (settings.isError) return null;
+  const data = settings.data;
+  const projectId = draft ?? data?.projectId ?? '';
+  const dirty = draft !== null && draft.trim() !== (data?.projectId ?? '');
+  const on = Boolean(data?.enabled && data?.projectId);
+
+  return (
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<IconActivity width={18} height={18} />}
+      title="Session recording"
+      description="Microsoft Clarity records how the team moves through the app — replays and heatmaps, in your Clarity dashboard. It is not shown to anyone being recorded."
+      status={<Pill tone={on ? 'good' : 'neutral'}>{on ? 'Recording' : 'Off'}</Pill>}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <FieldLabel htmlFor="clarity-project">Clarity project ID</FieldLabel>
+            <div className="flex items-center gap-2">
+              <input
+                id="clarity-project"
+                className="input w-full"
+                placeholder="e.g. abcd1234ef"
+                autoComplete="off"
+                spellCheck={false}
+                value={projectId}
+                disabled={save.isPending}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+              {dirty && (
+                <button
+                  className="btn-primary btn-sm shrink-0"
+                  disabled={save.isPending}
+                  onClick={() =>
+                    save.mutate(
+                      { projectId: (draft ?? '').trim() },
+                      { onSuccess: () => setDraft(null) },
+                    )
+                  }
+                >
+                  {save.isPending ? 'Saving…' : 'Save'}
+                </button>
+              )}
+            </div>
+            <Hint>
+              From clarity.microsoft.com → your project → Settings → Overview. Session data is stored by Microsoft, not in this app.
+            </Hint>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-lg border border-line bg-sunk/40 p-3">
+            <Switch
+              checked={on}
+              disabled={save.isPending || !data.projectId}
+              label="Record sessions"
+              onChange={(next) => save.mutate({ enabled: next })}
+            />
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium text-ink">Record sessions</div>
+              <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">
+                {!data.projectId
+                  ? 'Add a project ID first.'
+                  : on
+                    ? 'Every signed-in session is recorded and labelled with who it is.'
+                    : 'Switched off — nothing loads, the ID is kept.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      <ErrorLine error={save.error as Error | null} />
+    </SettingsCard>
+  );
+}
+
 type SyncPreset = 'today' | 'yesterday' | 'week' | 'month' | 'custom';
 
 const SYNC_PRESETS: { id: SyncPreset; label: string }[] = [
@@ -1806,6 +1896,7 @@ export default function Settings() {
           <>
             <ChasingCard />
             <AiUsageLinkCard />
+            <ClarityCard />
           </>
         )}
 
