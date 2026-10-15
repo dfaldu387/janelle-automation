@@ -18,8 +18,14 @@ function parseDraft(text: string): { to: string; cc: string; body: string } {
  * Gmail's compose deep link. Opens a new message in the user's Gmail with
  * every field prefilled — nothing is sent until they press Send there.
  */
-function gmailComposeUrl(d: { to: string; cc: string; subject: string; body: string }): string {
+function gmailComposeUrl(
+  d: { to: string; cc: string; subject: string; body: string },
+  mailboxEmail?: string | null,
+): string {
   const q = new URLSearchParams({ view: 'cm', fs: '1' });
+  // Open the compose in the studio's account, not whichever is first in this
+  // Chrome profile.
+  if (mailboxEmail) q.set('authuser', mailboxEmail);
   if (d.to) q.set('to', d.to);
   if (d.cc) q.set('cc', d.cc);
   if (d.subject) q.set('su', d.subject);
@@ -59,6 +65,7 @@ function DraftBody({ body }: { body: string }) {
 }
 
 function DraftEditor({ draft, onDone }: { draft: DraftRow; onDone: () => void }) {
+  const { gmailAccount } = useAuth();
   const parsed = parseDraft(draft.body_preview ?? '');
   const [to, setTo] = useState(parsed.to);
   const [cc, setCc] = useState(parsed.cc);
@@ -101,7 +108,7 @@ function DraftEditor({ draft, onDone }: { draft: DraftRow; onDone: () => void })
           {update.isPending ? 'Saving…' : 'Save changes'}
         </button>
         <a
-          href={gmailComposeUrl({ to, cc, subject, body })}
+          href={gmailComposeUrl({ to, cc, subject, body }, gmailAccount)}
           target="_blank"
           rel="noopener noreferrer"
           className="btn-secondary btn-sm"
@@ -121,7 +128,7 @@ function DraftEditor({ draft, onDone }: { draft: DraftRow; onDone: () => void })
 export default function Drafts() {
   const { data: all, isLoading } = useDrafts();
   const [scope] = useScope();
-  const { user } = useAuth();
+  const { user, gmailAccount } = useAuth();
 
   /**
    * Whose draft it is.
@@ -196,8 +203,8 @@ export default function Drafts() {
             // actual thread, ready to send from there.
             const isRealDraft = Boolean(d.gmail_message_id);
             const gmailUrl = isRealDraft
-              ? gmailMessageUrl(d.gmail_message_id as string)
-              : gmailComposeUrl({ to, cc, subject, body });
+              ? gmailMessageUrl(d.gmail_message_id as string, gmailAccount)
+              : gmailComposeUrl({ to, cc, subject, body }, gmailAccount);
             const gmailTitle = isRealDraft
               ? 'Open the actual Gmail draft, in its thread'
               : 'Open a prefilled compose window in Gmail — this draft never reached a live Gmail account';

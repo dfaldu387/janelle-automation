@@ -839,8 +839,24 @@ const STATUS_STYLE: Record<string, string> = {
   overdue: 'bg-crit/15 text-crit',
 };
 
-function statusStyle(s: string): string {
-  return STATUS_STYLE[s.toLowerCase()] ?? 'bg-sunk text-ink-soft';
+/**
+ * The badge colour for a tile's `meta`. Urgency wins first — a tile tagged
+ * crit/warn (overdue, due today) reads red/amber whatever the words are, so
+ * "26d late" no longer renders as muted grey; a plain status falls back to its
+ * own colour.
+ */
+function metaStyle(item: AssistantItem): string {
+  const m = (item.meta ?? '').toLowerCase();
+  if (item.tone === 'crit' || /late|overdue|blocked/.test(m)) return 'bg-crit/15 text-crit';
+  if (item.tone === 'warn' || /due today|today/.test(m)) return 'bg-warn/15 text-warn';
+  return STATUS_STYLE[m] ?? 'bg-sunk text-ink-soft';
+}
+
+/** A left stripe that lifts an urgent tile out of the grid. */
+function accentOf(tone: AssistantItem['tone']): string {
+  if (tone === 'crit') return 'border-l-[3px] border-l-crit';
+  if (tone === 'warn') return 'border-l-[3px] border-l-warn';
+  return '';
 }
 
 function BriefingTile({ item }: { item: AssistantItem }) {
@@ -848,36 +864,38 @@ function BriefingTile({ item }: { item: AssistantItem }) {
   const fields = (item.fields ?? []).filter((f) => f.value !== '—');
 
   const inner = (
-    <div className="flex h-full flex-col gap-2">
+    <div className="flex h-full flex-col gap-2.5">
       <div className="flex items-start justify-between gap-2">
         {label && (
-          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-faint">{label}</span>
+          <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-faint">{label}</span>
         )}
         {item.meta && (
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${statusStyle(item.meta)}`}>
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${metaStyle(item)}`}>
             {item.meta}
           </span>
         )}
       </div>
-      <p className="flex-1 text-[13.5px] font-semibold leading-snug text-ink">{item.title}</p>
+      <p className="text-[14px] font-semibold leading-snug text-ink">{item.title}</p>
       {item.detail && (
         <p className="text-[12px] leading-snug text-ink-soft">{item.detail}</p>
       )}
       {fields.length > 0 && (
-        <div className="mt-auto border-t border-line pt-2">
+        <dl className="mt-auto space-y-1 border-t border-line/70 pt-2.5">
           {fields.map((f) => (
-            <div key={f.label} className="flex gap-1 text-[11.5px]">
-              <span className="shrink-0 text-ink-faint">{f.label}</span>
-              <span className="min-w-0 truncate text-ink-soft">{f.value}</span>
+            <div key={f.label} className="flex items-baseline gap-2 text-[11.5px] leading-tight">
+              <dt className="w-12 shrink-0 text-ink-faint">{f.label}</dt>
+              <dd className="min-w-0 flex-1 truncate font-medium text-ink-soft">{f.value}</dd>
             </div>
           ))}
-        </div>
+        </dl>
       )}
     </div>
   );
 
   const href = assistantItemHref(item);
-  const cls = `block rounded-xl border border-line bg-surface p-3.5 transition-colors ${href ? 'hover:border-brass/40 hover:bg-brass/5' : ''}`;
+  const cls = `block rounded-xl border border-line bg-surface p-3.5 transition-colors ${accentOf(item.tone)} ${
+    href ? 'hover:border-brass/40 hover:bg-brass/5' : ''
+  }`;
   return <Target item={item} className={cls}>{inner}</Target>;
 }
 

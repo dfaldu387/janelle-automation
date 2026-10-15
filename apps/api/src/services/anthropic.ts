@@ -289,6 +289,24 @@ async function record(
 }
 
 /**
+ * Models that reject `temperature`, remembered so the studio pays for the
+ * refusal once, not on every email.
+ *
+ * The reading calls pin `temperature: 0` for a repeatable answer, but the
+ * newer Claude models have dropped the parameter and 400 the whole request
+ * ("`temperature` is deprecated for this model") — which, before this,
+ * failed every ingest on the model the studio had chosen. Temperature 0 is
+ * also these models' own default, so dropping it loses nothing.
+ */
+const temperatureRefused = new Set<string>();
+
+/** Does the provider's 400 say it was the temperature it objected to? */
+function rejectsTemperature(err: unknown): boolean {
+  const msg = String((err as Error)?.message ?? '');
+  return /temperature/i.test(msg) && /(deprecat|unsupported|not supported|no longer)/i.test(msg);
+}
+
+/**
  * Run a Claude call and record what it cost, whatever happens to it.
  *
  * The model comes from the studio's settings unless the caller named one
@@ -304,6 +322,11 @@ async function recorded(
   if (!ai) throw new AnthropicNotConfigured();
 
   const request = { ...params, model: params.model ?? ai.model };
+
+  // A model that has already refused temperature never gets it again.
+  if (request.temperature !== undefined && temperatureRefused.has(request.model)) {
+    delete request.temperature;
+  }
 
   // Kept inside the budget rather than trusting each call site to remember
   // one. The estimate counts the tools and the system prompt too, which is
@@ -329,6 +352,27 @@ async function recorded(
     return message;
   } catch (err) {
     await record(ctx, request.model, null, Date.now() - started, err);
+
+    // The newer models 400 the whole request over `temperature`. Drop it,
+    // remember the model so the next call never sends it, and run this one
+    // again — the alternative is every email failing until someone edits the
+    // model setting.
+    if (request.temperature !== undefined && rejectsTemperature(err)) {
+      temperatureRefused.add(request.model);
+      delete request.temperature;
+      const retryStarted = Date.now();
+      try {
+        const message = await ai.client.messages.create(
+          request,
+          options?.timeoutMs ? { timeout: options.timeoutMs } : undefined,
+        );
+        await record(ctx, request.model, message.usage, Date.now() - retryStarted, null);
+        return message;
+      } catch (retryErr) {
+        await record(ctx, request.model, null, Date.now() - retryStarted, retryErr);
+        throw retryErr;
+      }
+    }
 
     // The provider says this in a 400 with the rest of an API error around
     // it, so it reaches the screen as "Server error" and reads like a bug in

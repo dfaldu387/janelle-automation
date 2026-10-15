@@ -4,6 +4,7 @@ import { supabase, supabaseConfigured } from '../lib/supabase';
 import { api, SessionExpiredError } from '../lib/api';
 import { clearImpersonation } from '../lib/impersonate';
 import { recordSignIn } from '../lib/loginEvents';
+import { loadClarity, identifyClarity } from '../lib/clarity';
 import type { Action, Resource, Seat, UserRole } from '@janelle/shared';
 
 /** What this person may do, per module, with the studio's overrides applied. */
@@ -44,6 +45,13 @@ interface AuthCtx {
    */
   googleConnected: boolean | null;
   /**
+   * The Gmail address the studio's mail lives in, for building "Open in
+   * Gmail" links that target the right account by address (?authuser=) rather
+   * than a browser account index. Null until `/me` has answered or no mailbox
+   * has been read yet.
+   */
+  gmailAccount: string | null;
+  /**
    * Whether Google has REFUSED the connected grant — the status reads
    * connected, but it must be approved again before anything can be read.
    * Drives the reconnect prompt on sign-in. False until `/me` has answered.
@@ -83,6 +91,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
   /** Whether a connected grant has been refused and must be reconnected. */
   const [googleNeedsReconnect, setGoogleNeedsReconnect] = useState(false);
+  /** The studio's Gmail address, for account-targeted "Open in Gmail" links. */
+  const [gmailAccount, setGmailAccount] = useState<string | null>(null);
   // Read from the URL before anything else: supabase-js consumes the hash
   // as it starts up, and by the time a listener is attached the evidence
   // that this was a recovery link can already be gone.
@@ -101,8 +111,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const me = await api<{
         profile: Profile | null;
         access?: Access;
+        clarity?: { projectId: string } | null;
+        gmailAccount?: string | null;
         google?: { status?: string; needs_reconnect?: string | null };
       }>('/me');
+      setGmailAccount(me.gmailAccount ?? null);
+
+      // Session replay for the team, when an admin has turned it on. Loaded
+      // here because this call runs on every sign-in and session restore and
+      // already carries who the person is — so the recording is labelled with
+      // them. Silent: nothing about it is shown in the UI.
+      if (me.clarity?.projectId && me.profile) {
+        loadClarity(me.clarity.projectId);
+        identifyClarity(me.profile.id, me.profile.full_name ?? me.profile.email);
+      }
       // `/me` already says whether Google is connected, and this call is
       // awaited before the app renders. Reading it here means the first-run
       // prompt can decide on the first paint; asking again from the prompt
@@ -173,6 +195,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfileError(null);
         setGoogleConnected(null);
         setGoogleNeedsReconnect(false);
+        setGmailAccount(null);
       }
     });
 
@@ -194,6 +217,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setRecovery(false);
     setGoogleConnected(null);
     setGoogleNeedsReconnect(false);
+    setGmailAccount(null);
   };
 
   // Unknown means allowed: a slow /me must never look like a revoked module.
@@ -215,7 +239,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <Ctx.Provider
       value={{
         configured: supabaseConfigured, loading, session, profile, user, profileError, may,
-        refresh: loadProfile, signOut, googleConnected, googleNeedsReconnect,
+        refresh: loadProfile, signOut, googleConnected, googleNeedsReconnect, gmailAccount,
         recovery, endRecovery: () => setRecovery(false),
       }}
     >

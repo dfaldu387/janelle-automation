@@ -21,6 +21,7 @@ import {
 } from '../lib/aiSettings.js';
 import { OPENAI_IMAGE_MODELS, OPENAI_QUALITIES, PICTURE_ENGINES } from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
+import { readClaritySettings, saveClaritySettings } from '../lib/claritySettings.js';
 import { runIngest } from '../services/ingest.js';
 import { gmailFor } from '../services/gmail.js';
 import { isGoogleAuthFailure } from '../lib/tokens.js';
@@ -265,6 +266,56 @@ settingsRouter.put(
     });
 
     res.json({ data: await pictureView(orgId) });
+  }),
+);
+
+/**
+ * Microsoft Clarity — session replay/heatmaps of the team's own use of the
+ * app. Admin-only to read or change; the project id itself is handed to every
+ * signed-in session by `/me` so recording covers everyone.
+ */
+settingsRouter.get(
+  '/clarity',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await readClaritySettings(orgId) });
+  }),
+);
+
+settingsRouter.put(
+  '/clarity',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const patch: { projectId?: string | null; enabled?: boolean } = {};
+    if (req.body?.projectId !== undefined) patch.projectId = String(req.body.projectId ?? '');
+    if (req.body?.enabled !== undefined) {
+      if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
+      patch.enabled = req.body.enabled;
+    }
+
+    let saved;
+    try {
+      saved = await saveClaritySettings(orgId, patch);
+    } catch (err) {
+      return res.status(400).json({ error: (err as Error).message });
+    }
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.clarity_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      // The id is low-sensitivity, but the audit trail cares about on vs off.
+      meta: { enabled: saved.enabled, has_project: Boolean(saved.projectId) },
+    });
+
+    res.json({ data: saved });
   }),
 );
 

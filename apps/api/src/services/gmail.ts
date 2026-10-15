@@ -586,9 +586,20 @@ export async function searchMessages(
   return found;
 }
 
-/** Where a message opens in Gmail, for a person who wants the original. */
-export function gmailMessageUrl(gmailId: string): string {
-  return `https://mail.google.com/mail/u/0/#all/${gmailId}`;
+/**
+ * Where a message opens in Gmail, for a person who wants the original.
+ *
+ * Targets the account by address (`?authuser=`) when the mailbox email is
+ * known, so it opens the right account whatever its index is in the viewer's
+ * Chrome profile — a shared studio mailbox is rarely the first account signed
+ * in. Falls back to the first account (`/u/0/`) only when the address is
+ * unknown (nothing connected yet, or before migration 0038).
+ */
+export function gmailMessageUrl(gmailId: string, mailboxEmail?: string | null): string {
+  const base = 'https://mail.google.com/mail/';
+  return mailboxEmail
+    ? `${base}?authuser=${encodeURIComponent(mailboxEmail)}#all/${gmailId}`
+    : `${base}u/0/#all/${gmailId}`;
 }
 
 /** Download a single PDF attachment's bytes. */

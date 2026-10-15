@@ -643,6 +643,19 @@ async function ingestInternal(
     throw err;
   }
 
+  // Remember which Google account this mailbox is, so "Open in Gmail" can
+  // target it by address (?authuser=) instead of a browser account index.
+  // Best-effort: a missed write (or a column that predates migration 0038)
+  // just means the next ingest tries again.
+  if (selfEmail && supabaseAdmin) {
+    const { error } = await supabaseAdmin
+      .from('integrations')
+      .update({ account_email: selfEmail })
+      .eq('user_id', userId)
+      .eq('provider', 'google');
+    if (error && error.code !== '42703') console.error('[ingest] account_email not saved:', error.message);
+  }
+
   if (gmail) {
     // Read state is deliberately absent from this query. The studio reads
     // its mail in Gmail long before the system gets to it, so anything
