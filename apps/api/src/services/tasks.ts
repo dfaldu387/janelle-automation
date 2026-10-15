@@ -318,9 +318,25 @@ function titleKey(title: string): string {
     .trim();
 }
 
-/** The distinct words of a title, sharing titleKey's normalisation. */
+/**
+ * Grammatical filler — articles, prepositions, conjunctions — that Claude
+ * swaps freely when it re-words the same ask ("quote FROM Evelyn FOR Fred" vs
+ * "Evelyn TO quote … FOR Fred"). Dropped before any overlap is measured so a
+ * reorder of the same nouns and verbs reads as the same work. Deliberately NO
+ * action verbs (order/return/install/measure): those are what tell two tasks
+ * apart, so stripping them would merge "Order rug" with "Return rug".
+ */
+const TITLE_STOPWORDS = new Set(
+  'a an and the to for of from on in into with by at as or this that your our'.split(' '),
+);
+
+/**
+ * The distinct meaningful words of a title: titleKey's normalisation with
+ * grammatical filler removed, so word order and swapped prepositions stop
+ * splitting one reworded ask into two. See TITLE_STOPWORDS.
+ */
 function titleWords(title: string): Set<string> {
-  return new Set(titleKey(title).split(' ').filter(Boolean));
+  return new Set(titleKey(title).split(' ').filter((w) => w && !TITLE_STOPWORDS.has(w)));
 }
 
 /**
@@ -363,6 +379,56 @@ function sameWork(a: string, b: string): boolean {
   if (titleKey(a) === titleKey(b)) return true;
   if (titleWords(a).size < MIN_FUZZY_WORDS || titleWords(b).size < MIN_FUZZY_WORDS) return false;
   return titleSimilarity(a, b) >= TITLE_SIM_THRESHOLD;
+}
+
+/**
+ * Below this overlap two titles are plainly unrelated work and never worth a
+ * second look; at or above TITLE_SIM_THRESHOLD sameWork already merges them.
+ * The band between is where a reworded repeat hides — alike enough to suspect,
+ * too reworded for the word bar — and only there is the model asked.
+ */
+const AMBIGUOUS_MIN = 0.4;
+/** At most this many borderline titles go to the model in one question. */
+const MAX_SEMANTIC_CANDIDATES = 6;
+
+const SEMANTIC_DEDUP_SYSTEM = `You keep an interior-design studio's task board free of reworded duplicates.
+
+Claude writes each task's title fresh from a different email, so the SAME piece of work can appear twice in very different words. Decide whether a new task is a reworded duplicate of one already on the board.
+
+SAME work = the same action, on the same thing, for the same job — regardless of wording, word order, or which details each title happens to mention:
+- "Arrange Evelyn to measure and quote roller shade for Fred Keeler - Hitching Post" and "Arrange roller shade measure and quote for Fred Keeler kitchen" — SAME.
+
+DIFFERENT work, however similar the words:
+- a different action ("measure & quote" vs "install"), a different item ("dining table" vs "side table"), or a different job/client — NOT a duplicate.
+
+Reply with ONLY {"match": <number>} giving the existing task that is the same work as the new one, or {"match": null} if none is.`;
+
+/**
+ * Which existing task (if any) is the same work as `title`, decided by the
+ * model — the layer that catches reworded repeats word-overlap can't, like the
+ * lean "Arrange roller shade measure and quote for Fred Keeler kitchen" against
+ * a board already carrying the fuller "Arrange Evelyn to measure and quote
+ * roller shade for Fred Keeler - Hitching Post". Returns the index into
+ * `candidates`, or -1 for none. One cheap yes/no, asked only for the handful of
+ * borderline titles the caller has already narrowed to.
+ */
+async function semanticDuplicate(orgId: string, title: string, candidates: string[]): Promise<number> {
+  if (!candidates.length || !(await isAiReady(orgId))) return -1;
+  const list = candidates.map((c, i) => `${i + 1}. ${c}`).join('\n');
+  try {
+    const answer = await extractJson<{ match: number | null }>(
+      SEMANTIC_DEDUP_SYSTEM,
+      `New task: "${title}"\n\nExisting tasks:\n${list}`,
+      { feature: 'task.extract', orgId },
+      15_000,
+    );
+    const n = answer?.match;
+    return typeof n === 'number' && n >= 1 && n <= candidates.length ? n - 1 : -1;
+  } catch (err) {
+    // A failed read is not a verdict: let the task through rather than lose it.
+    console.error('[tasks] semantic dedup failed:', (err as Error).message);
+    return -1;
+  }
 }
 
 /**
@@ -1684,12 +1750,34 @@ export async function createTaskFromEmail(
   // Two DIFFERENT projects are still two jobs. Titles are compared by
   // sameWork, not an exact key, so Claude rewording the ask on the next
   // email ("countertop" → "countertop slab") no longer raises a second card.
+  const sameProject = (p: string | null) => p === projectOf || p === null || projectOf === null;
   const already = (liveSame ?? []).some((row) => {
     const r = row as { title: string; project_id: string | null };
     if (!sameWork(r.title, title)) return false;
-    return r.project_id === projectOf || r.project_id === null || projectOf === null;
+    return sameProject(r.project_id);
   });
   if (already) return false;
+
+  // Reworded repeat the word bar is too strict to catch: same job, alike
+  // enough to suspect but under sameWork's threshold. The model settles only
+  // these — a clear duplicate was dropped just above, a clear mismatch never
+  // reaches the band — so the call fires rarely and on at most a handful of
+  // titles. A yes marks the source email checked, so the verdict is not
+  // re-bought on the next scan.
+  const borderline = (liveSame ?? [])
+    .map((row) => row as { title: string; project_id: string | null })
+    .filter((r) => sameProject(r.project_id))
+    .map((r) => ({ title: r.title, sim: titleSimilarity(r.title, title) }))
+    .filter((c) => c.sim >= AMBIGUOUS_MIN && c.sim < TITLE_SIM_THRESHOLD)
+    .sort((a, b) => b.sim - a.sim)
+    .slice(0, MAX_SEMANTIC_CANDIDATES);
+  if (borderline.length) {
+    const hit = await semanticDuplicate(orgId, title, borderline.map((c) => c.title));
+    if (hit >= 0) {
+      await markTaskChecked(emailId);
+      return false;
+    }
+  }
 
   // The same document already has a task — open, or finished in the last few
   // days. A quote that arrives closes the chase for it; the mail that follows

@@ -20,6 +20,7 @@ import {
 import { loadStudioNames, type StudioNames } from '../lib/studioNames.js';
 import { STUDIO_MAILBOXES, STUDIO_TEAM, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
 import { createTaskFromEmail, mergeDuplicateTasks } from './tasks.js';
+import { fileDocumentsToDrive } from './driveFiling.js';
 import { isCheckinReply, recordCheckinReply } from './checkin.js';
 import { isAiReady, sweepStaleUploads } from './anthropic.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
@@ -1299,6 +1300,14 @@ async function ingestInternal(
       await removeVendorProjects(orgId);
     } catch (err) {
       console.error('[ingest] removing vendor-projects failed:', (err as Error).message);
+    }
+    try {
+      // Organise new attachment PDFs into the studio's Drive filing tree. A
+      // no-op unless an admin has turned it on and re-consented for write.
+      const f = await fileDocumentsToDrive(orgId);
+      if (f.filed) console.log(`[ingest] filed ${f.filed} document(s) to Drive`);
+    } catch (err) {
+      console.error('[ingest] filing documents to Drive failed:', (err as Error).message);
     }
   }
 

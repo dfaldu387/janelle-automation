@@ -6,6 +6,7 @@ import {
   IconActivity,
   IconAssistant,
   IconBell,
+  IconDoc,
   IconBoard,
   IconInbox,
   IconKey,
@@ -53,6 +54,8 @@ import {
   useSetIngestSettings,
   useClaritySettings,
   useSaveClaritySettings,
+  useDriveFilingSettings,
+  useSaveDriveFilingSettings,
   useRevokeUsageLink,
   useRotateUsageLink,
   useUsageLink,
@@ -1431,6 +1434,84 @@ function ClarityCard() {
   );
 }
 
+function DriveFilingCard() {
+  const settings = useDriveFilingSettings();
+  const save = useSaveDriveFilingSettings();
+  const [draft, setDraft] = useState<string | null>(null);
+
+  if (settings.isError) return null;
+  const data = settings.data;
+  const sendersText = (list: string[]) => list.join(', ');
+  const senders = draft ?? (data ? sendersText(data.senders) : '');
+  const dirty = draft !== null && draft.trim() !== (data ? sendersText(data.senders) : '');
+  const canWrite = Boolean(data?.canWrite);
+  const on = Boolean(data?.enabled);
+
+  const saveSenders = () =>
+    save.mutate(
+      { senders: (draft ?? '').split(',').map((s) => s.trim()).filter(Boolean) },
+      { onSuccess: () => setDraft(null) },
+    );
+
+  return (
+    <SettingsCard
+      className="lg:col-span-2"
+      icon={<IconDoc width={18} height={18} />}
+      title="Document filing"
+      description="Files PDF attachments from the people you choose into a tidy Google Drive tree — Purchasing and Accounting, by project — named by vendor, PO and date. It only touches folders it creates; your existing Drive is never changed."
+      status={<Pill tone={on ? 'good' : 'neutral'}>{on ? 'Filing' : 'Off'}</Pill>}
+    >
+      {!data ? (
+        <p className="text-[13px] text-ink-faint">Loading…</p>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <FieldLabel htmlFor="filing-senders">Whose attachments to file</FieldLabel>
+            <div className="flex items-center gap-2">
+              <input
+                id="filing-senders"
+                className="input w-full"
+                placeholder="adeleigh@…, carissa@…"
+                autoComplete="off"
+                spellCheck={false}
+                value={senders}
+                disabled={save.isPending}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+              {dirty && (
+                <button className="btn-primary btn-sm shrink-0" disabled={save.isPending} onClick={saveSenders}>
+                  {save.isPending ? 'Saving…' : 'Save'}
+                </button>
+              )}
+            </div>
+            <Hint>Email addresses, comma-separated. Only attachments from these senders are filed.</Hint>
+          </div>
+
+          <div className="flex items-start gap-3 rounded-lg border border-line bg-sunk/40 p-3">
+            <Switch
+              checked={on}
+              disabled={save.isPending || !canWrite}
+              label="File documents"
+              onChange={(next) => save.mutate({ enabled: next })}
+            />
+            <div className="min-w-0">
+              <div className="text-[13px] font-medium text-ink">File documents</div>
+              <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">
+                {!canWrite
+                  ? 'Reconnect Google to grant Drive filing access first — Settings → Integrations → reconnect Drive. Until then nothing is written.'
+                  : on
+                    ? 'New attachment PDFs are filed into Drive at the end of each email pass.'
+                    : 'Switched off — nothing is written to Drive.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      <ErrorLine error={save.error as Error | null} />
+    </SettingsCard>
+  );
+}
+
 type SyncPreset = 'today' | 'yesterday' | 'week' | 'month' | 'custom';
 
 const SYNC_PRESETS: { id: SyncPreset; label: string }[] = [
@@ -1897,6 +1978,7 @@ export default function Settings() {
             <ChasingCard />
             <AiUsageLinkCard />
             <ClarityCard />
+            <DriveFilingCard />
           </>
         )}
 

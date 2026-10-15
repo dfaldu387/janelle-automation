@@ -22,6 +22,9 @@ import {
 import { OPENAI_IMAGE_MODELS, OPENAI_QUALITIES, PICTURE_ENGINES } from '@janelle/shared';
 import { readIngestSettings, saveIngestSettings } from '../lib/ingestSettings.js';
 import { readClaritySettings, saveClaritySettings } from '../lib/claritySettings.js';
+import { readDriveFilingSettings, saveDriveFilingSettings } from '../lib/driveFilingSettings.js';
+import { driveCanWrite } from '../lib/google.js';
+import { orgSourceUserId } from '../lib/tokens.js';
 import { runIngest } from '../services/ingest.js';
 import { gmailFor } from '../services/gmail.js';
 import { isGoogleAuthFailure } from '../lib/tokens.js';
@@ -313,6 +316,76 @@ settingsRouter.put(
       entity_id: orgId,
       // The id is low-sensitivity, but the audit trail cares about on vs off.
       meta: { enabled: saved.enabled, has_project: Boolean(saved.projectId) },
+    });
+
+    res.json({ data: saved });
+  }),
+);
+
+/**
+ * The document organiser — files email-attachment PDFs into a Drive tree,
+ * Purchasing vs Accounting, by project. Admin-only. The GET also reports
+ * whether the studio account has actually granted Drive write, so the UI can
+ * ask for the one-time re-consent rather than silently filing nothing.
+ */
+settingsRouter.get(
+  '/drive-filing',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+    const settings = await readDriveFilingSettings(orgId);
+    // Whether the account that owns the filing tree can write to Drive yet.
+    let canWrite = false;
+    try {
+      const studioUser = await orgSourceUserId(orgId);
+      if (studioUser) {
+        const { data } = await supabaseAdmin!
+          .from('integrations')
+          .select('scopes')
+          .eq('user_id', studioUser)
+          .eq('provider', 'google')
+          .maybeSingle();
+        canWrite = driveCanWrite((data as { scopes?: string | null } | null)?.scopes);
+      }
+    } catch (err) {
+      console.error('[settings] drive write status unreadable:', (err as Error).message);
+    }
+    res.json({ data: { ...settings, canWrite } });
+  }),
+);
+
+settingsRouter.put(
+  '/drive-filing',
+  requirePermission('settings', 'update'),
+  asyncHandler(async (req, res) => {
+    const orgId = req.auth!.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No organization for user' });
+
+    const patch: { enabled?: boolean; senders?: string[] } = {};
+    if (req.body?.enabled !== undefined) {
+      if (typeof req.body.enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
+      patch.enabled = req.body.enabled;
+    }
+    if (req.body?.senders !== undefined) {
+      if (!Array.isArray(req.body.senders)) return res.status(400).json({ error: 'senders must be a list of addresses' });
+      patch.senders = req.body.senders.map(String);
+    }
+
+    let saved;
+    try {
+      saved = await saveDriveFilingSettings(orgId, patch);
+    } catch (err) {
+      return res.status(400).json({ error: (err as Error).message });
+    }
+
+    await supabaseAdmin?.from('activity_log').insert({
+      org_id: orgId,
+      actor: req.auth!.userId,
+      action: 'settings.drive_filing_set',
+      entity: 'organizations',
+      entity_id: orgId,
+      meta: { enabled: saved.enabled, senders: saved.senders.length },
     });
 
     res.json({ data: saved });

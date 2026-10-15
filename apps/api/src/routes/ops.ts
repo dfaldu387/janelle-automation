@@ -8,6 +8,7 @@ import { runFollowUps, resolveFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
 import { advanceActiveTasks, backfillTasks, mergeDuplicateTasks, reviewOpenTasks } from '../services/tasks.js';
+import { fileDocumentsToDrive } from '../services/driveFiling.js';
 import { sweepJobs } from '../services/mediaJobs.js';
 import { keepGoogleAlive } from '../services/googleKeepalive.js';
 import { runMiddayReminder, reminderSlotNow, type ReminderSlot } from '../services/middayReminder.js';
@@ -332,6 +333,19 @@ opsRouter.post(
   asyncHandler(async (req, res) => {
     if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
     res.json({ data: await mergeDuplicateTasks(req.auth!.orgId) });
+  }),
+);
+
+// File email-attachment PDFs into the studio's Drive tree. Ingestion does this
+// at the end of a pass; this runs it on demand (and clears any backlog). A
+// no-op unless filing is switched on and the studio account has re-consented
+// for Drive write.
+opsRouter.post(
+  '/file-documents',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await fileDocumentsToDrive(req.auth!.orgId) });
   }),
 );
 

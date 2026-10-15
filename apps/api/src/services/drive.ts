@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { drive as driveApi, type drive_v3 } from '@googleapis/drive';
 import { googleClientForUser } from '../lib/tokens.js';
 import { isWorkbook, workbookText } from '../lib/xlsx.js';
@@ -189,6 +190,91 @@ export async function driveFileBytes(
   if (!exp) return downloadFile(drive, fileId);
   const res = await drive.files.export({ fileId, mimeType: exp.mimeType }, { responseType: 'arraybuffer' });
   return Buffer.from(res.data as ArrayBuffer);
+}
+
+// ── Writing, for the document organiser ─────────────────────
+//
+// Everything below runs on the `drive.file` grant, which can see and touch
+// ONLY the files and folders this app itself created. That is why the organiser
+// builds its own tree from a named root: it can always find the folders it made
+// before (so filing is idempotent), and it can never reach — let alone change —
+// anything the studio keeps elsewhere in Drive.
+
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+/** An app-created folder with this exact name under `parentId` (root when null), or null. */
+async function childFolder(drive: drive_v3.Drive, name: string, parentId: string | null): Promise<string | null> {
+  const where = parentId ? `${quoted(parentId)} in parents` : `'root' in parents`;
+  const res = await drive.files.list({
+    q: `mimeType = '${FOLDER_MIME}' and trashed = false and name = ${quoted(name)} and ${where}`,
+    pageSize: 1,
+    fields: 'files(id)',
+    spaces: 'drive',
+  });
+  return res.data.files?.[0]?.id ?? null;
+}
+
+async function createFolder(drive: drive_v3.Drive, name: string, parentId: string | null): Promise<string> {
+  const res = await drive.files.create({
+    requestBody: { name, mimeType: FOLDER_MIME, ...(parentId ? { parents: [parentId] } : {}) },
+    fields: 'id',
+  });
+  return res.data.id!;
+}
+
+/**
+ * Ensure a folder path exists, creating any missing segment, and return the
+ * leaf folder's id. `['Filed', 'Purchasing', 'Oak FF&E']` walks or builds each
+ * level in turn. Idempotent: a path filed into yesterday is found, not remade.
+ */
+export async function ensureFolderPath(drive: drive_v3.Drive, segments: string[]): Promise<string> {
+  let parent: string | null = null;
+  for (const name of segments) {
+    parent = (await childFolder(drive, name, parent)) ?? (await createFolder(drive, name, parent));
+  }
+  if (!parent) throw new Error('ensureFolderPath needs at least one segment');
+  return parent;
+}
+
+export interface FiledFile {
+  id: string;
+  webViewLink: string | null;
+}
+
+/**
+ * An app-created file already tagged with this source reference, or null.
+ *
+ * Every filed attachment carries its `gmail:<msg>:<att>` origin in
+ * `appProperties`, so a re-run finds what it filed before and uploads nothing
+ * twice — the dedupe key that makes the whole pass safe to repeat.
+ */
+export async function findFiledByRef(drive: drive_v3.Drive, ref: string): Promise<FiledFile | null> {
+  const res = await drive.files.list({
+    q: `trashed = false and appProperties has { key='sourceRef' and value=${quoted(ref)} }`,
+    pageSize: 1,
+    fields: 'files(id,webViewLink)',
+    spaces: 'drive',
+  });
+  const f = res.data.files?.[0];
+  return f ? { id: f.id!, webViewLink: f.webViewLink ?? null } : null;
+}
+
+/** Upload a PDF into a folder, tagged with its origin ref for idempotent re-runs. */
+export async function uploadPdf(
+  drive: drive_v3.Drive,
+  opts: { folderId: string; name: string; bytes: Buffer; sourceRef: string },
+): Promise<FiledFile> {
+  const res = await drive.files.create({
+    requestBody: {
+      name: opts.name,
+      parents: [opts.folderId],
+      mimeType: 'application/pdf',
+      appProperties: { sourceRef: opts.sourceRef },
+    },
+    media: { mimeType: 'application/pdf', body: Readable.from(opts.bytes) },
+    fields: 'id,webViewLink',
+  });
+  return { id: res.data.id!, webViewLink: res.data.webViewLink ?? null };
 }
 
 /** Formats whose text can be read directly, and how to get at it. */

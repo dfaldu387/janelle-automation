@@ -8,9 +8,11 @@ import type { PDFDocument } from 'pdf-lib';
 const pdfLib = () => import('pdf-lib');
 import type { FileGrant } from '../lib/fileTokens.js';
 import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
-import { downloadAttachment, gmailFor, gmailMessageUrl } from './gmail.js';
+import { downloadAttachment, gmailForReply, gmailMessageUrl } from './gmail.js';
 import { downloadShape, driveFileBytes, driveFor } from './drive.js';
 import { readUpload } from '../lib/uploads.js';
+import { supabaseAdmin } from '../lib/supabase.js';
+import { hasEmailOwner } from '../lib/columns.js';
 
 /**
  * The bytes behind a file grant, for whoever needs them — the download
@@ -33,6 +35,46 @@ export interface FetchedFile {
   webUrl: string | null;
 }
 
+/**
+ * The HTTP status behind a Google (Gaxios) error, however the SDK carried it.
+ *
+ * Googleapis does not reliably put the numeric status on `.code` — that is
+ * often a string like `ERR_BAD_REQUEST`, while the real status sits on
+ * `.status` or `.response.status`. Reading only `.code` (as this used to) made
+ * `Number(code)` NaN, so a plain 404/400 fell straight through to a generic
+ * 500 "Server error" instead of the message meant for it.
+ */
+function googleErrorStatus(err: unknown): number | null {
+  const e = err as { status?: number; code?: number | string; response?: { status?: number } };
+  const raw = e?.status ?? e?.response?.status ?? e?.code;
+  const n = typeof raw === 'string' ? Number(raw) : raw;
+  return typeof n === 'number' && Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Which mailbox actually holds a Gmail message, by its own Gmail id — so its
+ * attachment is fetched with THAT mailbox's token, not whichever account
+ * happens to be the org's "source". A quote parsed from systems@ carries a
+ * per-mailbox message id that only systems@'s token can resolve; fetching it
+ * as a different principal 404s. Null when the owner cannot be read (no column
+ * yet, mail from before it was tracked, or shared studio mail) — the caller
+ * then falls back to the studio's shared connection, as before.
+ */
+async function mailboxOwnerFor(orgId: string, gmailId: string): Promise<string | null> {
+  if (!supabaseAdmin || !(await hasEmailOwner())) return null;
+  try {
+    const { data } = await supabaseAdmin
+      .from('emails')
+      .select('owner_id')
+      .eq('org_id', orgId)
+      .eq('gmail_id', gmailId)
+      .maybeSingle();
+    return (data as { owner_id: string | null } | null)?.owner_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchGrantedFile(grant: FileGrant): Promise<FetchedFile> {
   // Someone's own upload needs no Google account at all.
   if (grant.source === 'upload') {
@@ -46,7 +88,12 @@ export async function fetchGrantedFile(grant: FileGrant): Promise<FetchedFile> {
 
   try {
     if (grant.source === 'gmail') {
-      const gmail = await gmailFor(userId);
+      // The mailbox the message actually lives in, so its per-mailbox id
+      // resolves; the studio's shared connection only when the owner is
+      // unknown. Without this the fetch ran as the org "source" account and
+      // 404'd on anything in another mailbox (e.g. systems@).
+      const ownerId = await mailboxOwnerFor(grant.orgId, grant.messageId);
+      const gmail = await gmailForReply(grant.orgId, ownerId);
       if (!gmail) throw new FileFetchError('Gmail is not connected for the studio.', 409);
       const bytes = await downloadAttachment(gmail, grant.messageId, grant.attachmentId);
       return { bytes, name: grant.name, mimeType: grant.mimeType, webUrl: gmailMessageUrl(grant.messageId) };
@@ -64,7 +111,14 @@ export async function fetchGrantedFile(grant: FileGrant): Promise<FetchedFile> {
   } catch (err) {
     if (err instanceof FileFetchError) throw err;
     if (isGoogleAuthFailure(err)) throw new FileFetchError('Google needs reconnecting in Settings → Integrations.', 409);
-    if (Number((err as { code?: number }).code) === 404) throw new FileFetchError('That file no longer exists in Google.', 404);
+    const status = googleErrorStatus(err);
+    // 404: the message or attachment is gone from the mailbox. 400: Gmail
+    // rejected the attachment id — these rotate when a message is re-indexed,
+    // so a link minted earlier can go stale. Either way the original is still
+    // reachable in Gmail, which the card offers as the fallback.
+    if (status === 404) throw new FileFetchError('That file is no longer in Google — open it in Gmail instead.', 404);
+    if (status === 400) throw new FileFetchError('This attachment link has expired — open it in Gmail to see the file.', 410);
+    if (status === 403) throw new FileFetchError('The studio account cannot reach that file — reconnect Google in Settings → Integrations.', 403);
     throw err;
   }
 }
