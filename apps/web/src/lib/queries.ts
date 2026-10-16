@@ -825,6 +825,71 @@ export function gmailMessageUrl(gmailId: string, mailboxEmail?: string | null): 
   return `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(mailboxEmail)}&continue=${encodeURIComponent(direct)}`;
 }
 
+/** Which mobile OS, for choosing an app-launch scheme. Null on desktop. */
+function mobileOS(): 'android' | 'ios' | null {
+  if (typeof navigator === 'undefined') return null;
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) return 'android';
+  if (/iPhone|iPod|iPad/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  return null;
+}
+
+/**
+ * Turn a Gmail WEB url (a `mail.google.com` message or compose link) into a
+ * best-effort link that opens the Gmail APP, as a fallback beside the ordinary
+ * "Open in Gmail". Null on desktop (no app) and for anything that is not a
+ * Gmail web link — the caller then renders nothing.
+ *
+ * Google exposes no supported way to open a SPECIFIC thread or saved draft in
+ * the Gmail app: those permalinks are hash-based (`#all/<id>`), and neither
+ * Android app-links nor `googlegmail://` accept that fragment. A COMPOSE link
+ * (`?view=cm&…`) is query-only, so its fields do carry into the app.
+ * - **Android:** an `intent:` targeting the Gmail package, with the full web url
+ *   as `browser_fallback_url` — so a phone without Gmail still lands there. The
+ *   hash fragment cannot ride in an intent, so a thread/draft opens the app to
+ *   its inbox while the fallback keeps the exact message; a compose carries its
+ *   fields through.
+ * - **iOS:** a compose link becomes `googlegmail:///co?…` (opens the app
+ *   composer, prefilled); anything else becomes `googlegmail://` (opens the app
+ *   to its inbox). If Gmail is not installed an iOS scheme does nothing, so this
+ *   is only ever offered as a SECONDARY link beside the web one.
+ */
+export function gmailAppHrefForUrl(webUrl: string | null | undefined): string | null {
+  const os = mobileOS();
+  if (!os || !webUrl) return null;
+  let u: URL;
+  try {
+    u = new URL(webUrl);
+  } catch {
+    return null;
+  }
+  if (u.hostname !== 'mail.google.com') return null;
+  const isCompose = u.searchParams.get('view') === 'cm';
+  if (os === 'ios') {
+    if (!isCompose) return 'googlegmail://';
+    const p = new URLSearchParams();
+    const to = u.searchParams.get('to');
+    const cc = u.searchParams.get('cc');
+    const su = u.searchParams.get('su');
+    const body = u.searchParams.get('body');
+    if (to) p.set('to', to);
+    if (cc) p.set('cc', cc);
+    if (su) p.set('subject', su);
+    if (body) p.set('body', body);
+    const qs = p.toString();
+    return `googlegmail:///co${qs ? `?${qs}` : ''}`;
+  }
+  // Android: hand the link to the Gmail app; the fragment is dropped from the
+  // app target (intents cannot carry it) but kept in the web fallback.
+  const target = `${u.host}${u.pathname}${u.search}`;
+  return `intent://${target}#Intent;scheme=https;package=com.google.android.gm;S.browser_fallback_url=${encodeURIComponent(webUrl)};end`;
+}
+
+/** The Gmail-app fallback for a message by id — wraps {@link gmailMessageUrl}. */
+export function gmailAppHref(gmailId: string, mailboxEmail?: string | null): string | null {
+  return gmailAppHrefForUrl(gmailMessageUrl(gmailId, mailboxEmail));
+}
+
 interface DocRow {
   id: string; type: string; confidence: number | null; created_at: string;
   parsed_json: { vendor?: string; total?: number } | null; projects: { name: string } | null;

@@ -4,7 +4,6 @@ import { NavLink, Link, useLocation } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { useFollowUps, useDrafts, useMentions, useMarkMentionsRead, ageFrom } from '../lib/queries';
-import { useAssistant } from '../context/AssistantContext';
 import { AssistantLauncher, AssistantPanel } from './AssistantPanel';
 import { TaskReminder } from './TaskReminder';
 import { ConnectGooglePrompt } from './ConnectGooglePrompt';
@@ -637,40 +636,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const base = '/' + location.pathname.split('/')[1];
   const pageTitle = PAGE_TITLES[base] ?? PAGE_TITLES['/'];
 
-  // With the assistant panel open on a wide screen, the page moves over
-  // rather than sitting underneath it: the point of asking beside the page
-  // is being able to see the page.
-  const assistant = useAssistant();
-
-  // When a full-screen overlay (e.g. the task detail panel) is open it sets
-  // data-task-panel-open on <html>. In that case the board is already hidden
-  // behind a backdrop, so compressing it for Jenny's side panel would just
-  // cause a visible reflow behind the overlay. Suppress the padding instead.
-  const [overlayOpen, setOverlayOpen] = useState(
-    () => document.documentElement.dataset.taskPanelOpen === 'true',
-  );
-  useEffect(() => {
-    const obs = new MutationObserver(() => {
-      setOverlayOpen(document.documentElement.dataset.taskPanelOpen === 'true');
-    });
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-task-panel-open'] });
-    return () => obs.disconnect();
-  }, []);
-
-  const docked = assistant.open && base !== '/assistant' && !overlayOpen;
-
-  // Full-screen overlays — the task panel, a modal — are fixed to the window,
-  // not to this layout, so the padding above does not reach them. They opt in
-  // with `dock-aware` and stop at the panel's edge (index.css) instead of
-  // opening underneath it.
-  useEffect(() => {
-    const root = document.documentElement;
-    if (docked) root.dataset.assistantDocked = 'true';
-    else delete root.dataset.assistantDocked;
-    return () => {
-      delete root.dataset.assistantDocked;
-    };
-  }, [docked]);
+  // Jenny's panel is a backdrop-plus-overlay (see AssistantPanel): it floats
+  // over the page rather than pushing it aside, so the board behind keeps its
+  // exact layout when Jenny opens — the same way the midday check-in drawer
+  // opens. No docking padding, and nothing here reflows the page.
 
   return (
     /*
@@ -684,7 +653,7 @@ export function AppShell({ children }: { children: ReactNode }) {
      * `clip` crops the same overflow without creating a scrollport, so both
      * go back to sticking to the viewport.
      */
-    <div className={`flex min-h-screen overflow-x-clip transition-[padding] duration-200 ease-out ${docked ? 'sm:pr-[440px]' : ''}`}>
+    <div className="flex min-h-screen overflow-x-clip">
       {/* Sidebar — desktop */}
       <aside
         className={`relative z-40 hidden shrink-0 bg-nav transition-[width] duration-200 ease-out lg:block ${collapsed ? 'w-[68px]' : 'w-60'}`}

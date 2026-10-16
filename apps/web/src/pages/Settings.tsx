@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { ASSISTANT_NAME, canSupervise, type AiRoutingFeatureView, type AiRoutingView, type LlmProvider } from '@janelle/shared';
 import { Page, PageHeading, Card, Pill, PasswordInput, Switch } from '../components/ui';
 import {
@@ -1808,7 +1809,10 @@ function GoogleCard() {
           connected={drive}
           everConnected={anyConnected}
           Mark={DriveMark}
-          scopes={[{ name: 'drive.readonly', note: 'list and download files' }]}
+          scopes={[
+            { name: 'drive.readonly', note: 'list and download files' },
+            { name: 'drive.file', note: 'create & manage only files Jenny makes' },
+          ]}
         />
       </div>
 
@@ -1899,6 +1903,24 @@ export default function Settings() {
   const { may, user } = useAuth();
   const [params, setParams] = useSearchParams();
   const flash = googleFlash();
+  const queryClient = useQueryClient();
+
+  // Coming back from Google consent, the cards read `me.google`, which the
+  // query already holds from before the round trip. A same-tab return from
+  // the OAuth redirect is sometimes served without a fresh fetch (bfcache, or
+  // the popup's opener keeping its in-memory cache), so the banner said
+  // "connected" while the cards still read "Not connected". Re-read `me` the
+  // moment we land back with a Google result so the cards reflect the truth.
+  const googleResult = params.get('google');
+  useEffect(() => {
+    if (!googleResult) return;
+    // The connection pills read `me`; the Document-filing toggle reads
+    // `drive-filing-settings` (its `canWrite` flips only once Drive is
+    // reconnected with the `drive.file` scope). Refetch both so a reconnect
+    // is reflected without a hard refresh.
+    void queryClient.invalidateQueries({ queryKey: ['me'] });
+    void queryClient.invalidateQueries({ queryKey: ['drive-filing-settings'] });
+  }, [googleResult, queryClient]);
 
   // Sections a person cannot use are hidden rather than shown empty.
   const allowed: Record<TabAccess, boolean> = {
