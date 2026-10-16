@@ -123,8 +123,11 @@ async function projectName(orgId: string, projectId: string | null): Promise<str
 export async function fileDocumentsToDrive(orgId: string): Promise<FilingResult> {
   if (!supabaseAdmin) return { filed: 0, skipped: 0, reason: 'not_configured' };
 
+  // Filing is automatic: it runs whenever the studio account can write to Drive
+  // (checked below) and there is at least one named sender to file from. There
+  // is no on/off switch — nobody to file from is the only "off".
   const settings: DriveFilingSettings = await readDriveFilingSettings(orgId);
-  if (!settings.enabled || !settings.senders.length) return { filed: 0, skipped: 0, reason: 'disabled' };
+  if (!settings.senders.length) return { filed: 0, skipped: 0, reason: 'disabled' };
 
   // The studio account owns the filing tree; attachment bytes are fetched with
   // the mailbox owner's own token below.

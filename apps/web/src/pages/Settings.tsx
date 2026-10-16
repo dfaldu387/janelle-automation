@@ -1446,7 +1446,6 @@ function DriveFilingCard() {
   const senders = draft ?? (data ? sendersText(data.senders) : '');
   const dirty = draft !== null && draft.trim() !== (data ? sendersText(data.senders) : '');
   const canWrite = Boolean(data?.canWrite);
-  const on = Boolean(data?.enabled);
 
   const saveSenders = () =>
     save.mutate(
@@ -1459,8 +1458,8 @@ function DriveFilingCard() {
       className="lg:col-span-2"
       icon={<IconDoc width={18} height={18} />}
       title="Document filing"
-      description="Files PDF attachments from the people you choose into a tidy Google Drive tree — Purchasing and Accounting, by project — named by vendor, PO and date. It only touches folders it creates; your existing Drive is never changed."
-      status={<Pill tone={on ? 'good' : 'neutral'}>{on ? 'Filing' : 'Off'}</Pill>}
+      description="Files PDF attachments from the people you choose into a tidy Google Drive tree — Purchasing and Accounting, by project — named by vendor, PO and date. It only touches folders it creates; your existing Drive is never changed. It runs automatically once Drive has write access."
+      status={<Pill tone={canWrite ? 'good' : 'neutral'}>{canWrite ? 'Filing' : 'Needs Drive access'}</Pill>}
     >
       {!data ? (
         <p className="text-[13px] text-ink-faint">Loading…</p>
@@ -1489,20 +1488,18 @@ function DriveFilingCard() {
           </div>
 
           <div className="flex items-start gap-3 rounded-lg border border-line bg-sunk/40 p-3">
-            <Switch
-              checked={on}
-              disabled={save.isPending || !canWrite}
-              label="File documents"
-              onChange={(next) => save.mutate({ enabled: next })}
+            <span
+              className={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${canWrite ? 'bg-good' : 'bg-ink-faint'}`}
+              aria-hidden="true"
             />
             <div className="min-w-0">
-              <div className="text-[13px] font-medium text-ink">File documents</div>
+              <div className="text-[13px] font-medium text-ink">
+                {canWrite ? 'Filing automatically' : 'Waiting on Drive access'}
+              </div>
               <p className="mt-0.5 text-[12px] leading-snug text-ink-soft">
-                {!canWrite
-                  ? 'Reconnect Google to grant Drive filing access first — Settings → Integrations → reconnect Drive. Until then nothing is written.'
-                  : on
-                    ? 'New attachment PDFs are filed into Drive at the end of each email pass.'
-                    : 'Switched off — nothing is written to Drive.'}
+                {canWrite
+                  ? 'New attachment PDFs from the senders above are filed into Drive at the end of each email pass — no switch to flip.'
+                  : 'Reconnect Google to grant Drive filing access first — Settings → Connections → reconnect Drive. Until then nothing is written.'}
               </p>
             </div>
           </div>
