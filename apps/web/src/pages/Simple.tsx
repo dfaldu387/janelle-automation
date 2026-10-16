@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react';
 import { Avatar, CategoryTag, ProjectName } from '../components/hue';
 import { Link, useSearchParams } from 'react-router-dom';
 import { Page, PageHeading, Card, Pill, money, shortDate } from '../components/ui';
-import { useEmails, useEmail, useDocuments, gmailMessageUrl, type DocSource } from '../lib/queries';
+import { useEmails, useEmail, useDocuments, gmailMessageUrl, gmailAppHref, type DocSource } from '../lib/queries';
 import { useAuth } from '../context/AuthContext';
 import { apiBlob } from '../lib/api';
 import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
@@ -185,14 +185,24 @@ export function Inbox() {
                   {openedEmail.summary || openedEmail.snippet || ''}
                 </p>
                 {openedEmail.gmailId && (
-                  <a
-                    href={gmailMessageUrl(openedEmail.gmailId, gmailAccount)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="focusable mt-2 inline-block text-[12.5px] font-semibold text-brass-deep hover:underline"
-                  >
-                    Open in Gmail →
-                  </a>
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <a
+                      href={gmailMessageUrl(openedEmail.gmailId, gmailAccount)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="focusable inline-block text-[12.5px] font-semibold text-brass-deep hover:underline"
+                    >
+                      Open in Gmail →
+                    </a>
+                    {gmailAppHref(openedEmail.gmailId, gmailAccount) && (
+                      <a
+                        href={gmailAppHref(openedEmail.gmailId, gmailAccount)!}
+                        className="focusable inline-block text-[12.5px] font-semibold text-ink-soft hover:text-ink hover:underline"
+                      >
+                        Open in Gmail app →
+                      </a>
+                    )}
+                  </div>
                 )}
               </div>
             )}
@@ -347,15 +357,26 @@ export function Inbox() {
                           </p>
                           <div className="mt-2 flex flex-wrap items-center gap-3">
                             {m.gmailId ? (
-                              <a
-                                href={gmailMessageUrl(m.gmailId, gmailAccount)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="focusable text-[12.5px] font-semibold text-brass-deep hover:underline"
-                              >
-                                Open in Gmail →
-                              </a>
+                              <>
+                                <a
+                                  href={gmailMessageUrl(m.gmailId, gmailAccount)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="focusable text-[12.5px] font-semibold text-brass-deep hover:underline"
+                                >
+                                  Open in Gmail →
+                                </a>
+                                {gmailAppHref(m.gmailId, gmailAccount) && (
+                                  <a
+                                    href={gmailAppHref(m.gmailId, gmailAccount)!}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="focusable text-[12.5px] font-semibold text-ink-soft hover:text-ink hover:underline"
+                                  >
+                                    Open in Gmail app →
+                                  </a>
+                                )}
+                              </>
                             ) : (
                               <span className="text-[12px] text-ink-faint">No Gmail message on file for this row.</span>
                             )}

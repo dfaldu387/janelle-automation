@@ -825,6 +825,42 @@ export function gmailMessageUrl(gmailId: string, mailboxEmail?: string | null): 
   return `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(mailboxEmail)}&continue=${encodeURIComponent(direct)}`;
 }
 
+/** Which mobile OS, for choosing an app-launch scheme. Null on desktop. */
+function mobileOS(): 'android' | 'ios' | null {
+  if (typeof navigator === 'undefined') return null;
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) return 'android';
+  if (/iPhone|iPod|iPad/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  return null;
+}
+
+/**
+ * A best-effort link that opens the Gmail APP rather than the mobile web, as a
+ * fallback beside the ordinary "Open in Gmail". Null on desktop (no app) — the
+ * caller then renders nothing.
+ *
+ * Google exposes no supported way to open a SPECIFIC thread in the Gmail app:
+ * message permalinks are hash-based (`#all/<id>`), and neither Android app-links
+ * nor the `googlegmail://` scheme accept that fragment. So this opens the app,
+ * and the exact thread is preserved only on the web fallback:
+ * - **Android:** an `intent:` targeting the Gmail package, with the direct web
+ *   message link as `browser_fallback_url` — so a phone without Gmail still
+ *   lands on the thread in the browser. The app itself opens to its inbox
+ *   (intents cannot carry the message fragment).
+ * - **iOS:** `googlegmail://` opens the app to its inbox; if Gmail is not
+ *   installed the tap does nothing, so this is offered only as a secondary link.
+ */
+export function gmailAppHref(gmailId: string, mailboxEmail?: string | null): string | null {
+  const os = mobileOS();
+  if (!os) return null;
+  if (os === 'ios') return 'googlegmail://';
+  const fallback = gmailMessageUrl(gmailId, mailboxEmail); // direct mail.google.com on mobile
+  const inbox = mailboxEmail
+    ? `mail.google.com/mail/?authuser=${encodeURIComponent(mailboxEmail)}`
+    : 'mail.google.com/mail/u/0/';
+  return `intent://${inbox}#Intent;scheme=https;package=com.google.android.gm;S.browser_fallback_url=${encodeURIComponent(fallback)};end`;
+}
+
 interface DocRow {
   id: string; type: string; confidence: number | null; created_at: string;
   parsed_json: { vendor?: string; total?: number } | null; projects: { name: string } | null;
