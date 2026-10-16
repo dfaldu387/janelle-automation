@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Page, PageHeading, Card } from '../components/ui';
 import { RichTextEditor, toEditorHtml, htmlToPlainText } from '../components/RichTextEditor';
-import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, gmailAppHrefForUrl, isMobileOrTablet, type DraftRow } from '../lib/queries';
+import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, gmailLinkProps, isMobileOrTablet, type DraftRow } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
 
@@ -117,22 +117,12 @@ function DraftEditor({ draft, onDone }: { draft: DraftRow; onDone: () => void })
         </button>
         <a
           href={gmailComposeUrl({ to, cc, subject, body }, gmailAccount)}
-          target="_blank"
-          rel="noopener noreferrer"
+          {...gmailLinkProps()}
           className="btn-secondary btn-sm"
           title="Opens Gmail with the text as it is right now (unsaved edits included)"
         >
           <GmailIcon /> Open in Gmail
         </a>
-        {gmailAppHrefForUrl(gmailComposeUrl({ to, cc, subject, body }, gmailAccount)) && (
-          <a
-            href={gmailAppHrefForUrl(gmailComposeUrl({ to, cc, subject, body }, gmailAccount))!}
-            className="btn-secondary btn-sm"
-            title="Open the Gmail app composer with this text"
-          >
-            <GmailIcon /> Gmail app
-          </a>
-        )}
         <button onClick={onDone} disabled={update.isPending} className="btn-ghost btn-sm">
           Cancel
         </button>
@@ -225,9 +215,6 @@ export default function Drafts() {
             const gmailTitle = isRealDraft
               ? 'Open the actual Gmail draft, in its thread'
               : 'Open a prefilled compose window in Gmail — this draft never reached a live Gmail account';
-            // On a phone/tablet, a second link that launches the Gmail app
-            // (null on desktop, so nothing extra renders there).
-            const gmailAppUrl = gmailAppHrefForUrl(gmailUrl);
             const preview = htmlToPlainText(body).replace(/\s+/g, ' ').slice(0, 110);
             const isLinked = d.id === openId;
             return (
@@ -254,18 +241,12 @@ export default function Drafts() {
                     )}
                     <a
                       href={gmailUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      {...gmailLinkProps()}
                       className="btn-primary btn-sm"
                       title={gmailTitle}
                     >
                       <GmailIcon /> Open in Gmail
                     </a>
-                    {gmailAppUrl && (
-                      <a href={gmailAppUrl} className="btn-secondary btn-sm" title="Open in the Gmail app">
-                        <GmailIcon /> Gmail app
-                      </a>
-                    )}
                   </div>
                 </div>
 
@@ -294,14 +275,9 @@ export default function Drafts() {
                       <button onClick={() => startEdit(d.id)} className="btn-primary btn-sm">
                         <PencilIcon /> Edit draft
                       </button>
-                      <a href={gmailUrl} target="_blank" rel="noopener noreferrer" className="btn-secondary btn-sm">
+                      <a href={gmailUrl} {...gmailLinkProps()} className="btn-secondary btn-sm">
                         <GmailIcon /> Open in Gmail
                       </a>
-                      {gmailAppUrl && (
-                        <a href={gmailAppUrl} className="btn-secondary btn-sm" title="Open in the Gmail app">
-                          <GmailIcon /> Gmail app
-                        </a>
-                      )}
                       <button
                         onClick={() => navigator.clipboard?.writeText(htmlToPlainText(body)).catch(() => {})}
                         className="btn-secondary btn-sm"
