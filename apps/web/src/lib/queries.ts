@@ -847,6 +847,15 @@ export function gmailLinkProps(): { target?: '_blank'; rel?: string } {
   return isMobileOrTablet() ? {} : { target: '_blank', rel: 'noopener noreferrer' };
 }
 
+/** Which mobile OS this is, for choosing an app-launch form. Null on desktop. */
+export function mobileOS(): 'android' | 'ios' | null {
+  if (typeof navigator === 'undefined') return null;
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) return 'android';
+  if (/iPhone|iPod|iPad/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'ios';
+  return null;
+}
+
 interface DocRow {
   id: string; type: string; confidence: number | null; created_at: string;
   parsed_json: { vendor?: string; total?: number } | null; projects: { name: string } | null;

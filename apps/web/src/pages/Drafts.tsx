@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Page, PageHeading, Card } from '../components/ui';
 import { RichTextEditor, toEditorHtml, htmlToPlainText } from '../components/RichTextEditor';
-import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, gmailLinkProps, isMobileOrTablet, type DraftRow } from '../lib/queries';
+import { useDrafts, useDeleteDraft, useUpdateDraft, gmailMessageUrl, gmailLinkProps, mobileOS, isMobileOrTablet, type DraftRow } from '../lib/queries';
 import { ScopeToggle, useScope } from '../components/ScopeToggle';
 import { useAuth } from '../context/AuthContext';
 
@@ -39,6 +39,40 @@ function gmailComposeUrl(
   // the account chooser so the compose opens in the studio account.
   if (isMobileOrTablet() || !mailboxEmail) return compose;
   return `https://accounts.google.com/AccountChooser?Email=${encodeURIComponent(mailboxEmail)}&continue=${encodeURIComponent(compose)}`;
+}
+
+/**
+ * Where "Open in Gmail" for a DRAFT should point on THIS device.
+ *
+ * A saved draft cannot be opened in the Gmail mobile app — Google exposes no
+ * deep-link to a specific draft, and the message permalink lands on the inbox.
+ * The only app-openable target is the COMPOSER, prefilled with the draft's
+ * fields, so on a phone/tablet that is what the button opens:
+ * - **iOS:** the `googlegmail:///co` scheme opens the Gmail app composer.
+ * - **Android:** the `https://mail.google.com/mail/?view=cm…` compose URL, which
+ *   the Gmail app claims as a verified link ("open supported links") and opens
+ *   as a composer; with that setting off it falls back to Gmail on the web.
+ * - **Desktop:** `desktopUrl` unchanged (the real draft, or a web composer).
+ *
+ * It opens a prefilled composer, not the saved Gmail draft (which has no app
+ * target); sending from it is the same message, minus Gmail's own draft row.
+ */
+function gmailDraftOpenHref(
+  fields: { to: string; cc: string; subject: string; body: string },
+  mailboxEmail: string | null | undefined,
+  desktopUrl: string,
+): string {
+  const os = mobileOS();
+  if (!os) return desktopUrl;
+  if (os === 'android') return gmailComposeUrl(fields, mailboxEmail); // mobile branch = direct compose URL
+  const p = new URLSearchParams();
+  if (fields.to) p.set('to', fields.to);
+  if (fields.cc) p.set('cc', fields.cc);
+  if (fields.subject) p.set('subject', fields.subject);
+  const body = htmlToPlainText(fields.body);
+  if (body) p.set('body', body);
+  const qs = p.toString();
+  return `googlegmail:///co${qs ? `?${qs}` : ''}`;
 }
 
 function ageFrom(iso: string): string {
@@ -116,7 +150,11 @@ function DraftEditor({ draft, onDone }: { draft: DraftRow; onDone: () => void })
           {update.isPending ? 'Saving…' : 'Save changes'}
         </button>
         <a
-          href={gmailComposeUrl({ to, cc, subject, body }, gmailAccount)}
+          href={gmailDraftOpenHref(
+            { to, cc, subject, body },
+            gmailAccount,
+            gmailComposeUrl({ to, cc, subject, body }, gmailAccount),
+          )}
           {...gmailLinkProps()}
           className="btn-secondary btn-sm"
           title="Opens Gmail with the text as it is right now (unsaved edits included)"
@@ -215,6 +253,9 @@ export default function Drafts() {
             const gmailTitle = isRealDraft
               ? 'Open the actual Gmail draft, in its thread'
               : 'Open a prefilled compose window in Gmail — this draft never reached a live Gmail account';
+            // On a phone/tablet this becomes a Gmail-app composer link (a draft
+            // has no app deep-link); on desktop it stays the draft/web link.
+            const gmailOpenUrl = gmailDraftOpenHref({ to, cc, subject, body }, gmailAccount, gmailUrl);
             const preview = htmlToPlainText(body).replace(/\s+/g, ' ').slice(0, 110);
             const isLinked = d.id === openId;
             return (
@@ -240,7 +281,7 @@ export default function Drafts() {
                       </button>
                     )}
                     <a
-                      href={gmailUrl}
+                      href={gmailOpenUrl}
                       {...gmailLinkProps()}
                       className="btn-primary btn-sm"
                       title={gmailTitle}
@@ -275,7 +316,7 @@ export default function Drafts() {
                       <button onClick={() => startEdit(d.id)} className="btn-primary btn-sm">
                         <PencilIcon /> Edit draft
                       </button>
-                      <a href={gmailUrl} {...gmailLinkProps()} className="btn-secondary btn-sm">
+                      <a href={gmailOpenUrl} {...gmailLinkProps()} className="btn-secondary btn-sm">
                         <GmailIcon /> Open in Gmail
                       </a>
                       <button
