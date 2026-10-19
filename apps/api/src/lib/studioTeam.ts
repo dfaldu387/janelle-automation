@@ -65,13 +65,10 @@ export const STUDIO_MAILBOXES = ['systems@janelleinteriors.com'];
 export const STUDIO_TEAM: StudioPerson[] = [
   { name: 'Janelle Kandziora', email: 'janelle@janelleinteriors.com', seat: 'owner' },
   { name: 'Carissa Kolbeck', email: 'carissa@janelleinteriors.com', seat: 'operations' },
-  { name: 'Joanna Ramos', email: 'ramos.joannaeve@gmail.com', seat: 'pm_support' },
-  { name: 'Victoria Manayan', email: 'manayan.victoriam@gmail.com', seat: 'technical_production' },
+  { name: 'Joanna Ramos', email: 'joanna@janelleinteriors.com', seat: 'pm_support', otherEmails: ['ramos.joannaeve@gmail.com'] },
+  { name: 'Victoria Manayan', email: 'victoria@janelleinteriors.com', seat: 'technical_production', otherEmails: ['manayan.victoriam@gmail.com'] },
   { name: 'Adeleigh McGee', email: 'adeleigh@janelleinteriors.com', seat: 'hotel_ffe', aliases: ['Adelaide McGee'] },
   { name: 'Brianna Johnson', email: 'brianna@janelleinteriors.com', seat: 'design' },
-  { name: 'Amanda Neubecker', email: 'amanda.neubecker@gmail.com', seat: 'design', otherEmails: ['amanda.neubecker@outlook.com'] },
-  // On the studio's team list with no seat in the roles document.
-  { name: 'Taryn Choquette', email: 'taryn@janelleinteriors.com', seat: null },
 ];
 
 /** The bare address out of "Name <address>", lower-cased; '' when there is none. */
