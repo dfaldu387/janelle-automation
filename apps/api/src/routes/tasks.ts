@@ -42,14 +42,26 @@ async function categoryColumns(): Promise<string> {
 tasksRouter.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { data, error } = await req.auth!.db
-      .from('tasks')
-      .select(
-        `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}${await assignmentColumns()}${await categoryColumns()}, projects(name), vendors(name), profiles(full_name)`,
-      )
-      .order('created_at', { ascending: false });
-    if (error) throw new Error(error.message);
-    res.json({ data });
+    const columns = `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step, project_id, vendor_id, source_email_id, due_date, created_at, updated_at${await completionColumns()}${await assignmentColumns()}${await categoryColumns()}, projects(name), vendors(name), profiles(full_name)`;
+    // PostgREST caps a single response at its `max-rows` (1000 here), and the
+    // board needs EVERY task: ordered newest-first, a cap silently drops the
+    // oldest, so once the studio passed 1000 tasks its September overdue work
+    // stopped loading and no board filter could bring it back. Page through
+    // until a short page proves the end, rather than trusting one request.
+    const PAGE = 1000;
+    const all: unknown[] = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await req.auth!.db
+        .from('tasks')
+        .select(columns)
+        .order('created_at', { ascending: false })
+        .range(from, from + PAGE - 1);
+      if (error) throw new Error(error.message);
+      const batch = data ?? [];
+      all.push(...batch);
+      if (batch.length < PAGE) break;
+    }
+    res.json({ data: all });
   }),
 );
 
