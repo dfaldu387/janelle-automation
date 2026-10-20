@@ -5,6 +5,7 @@ import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
 import { GOOGLE_HEALTH_ACTION, latestGoogleHealth, type GoogleHealth } from '../lib/googleHealth.js';
 import { gmailFor, sendMessage } from './gmail.js';
 import { reconnectEmail } from './emailTemplate.js';
+import { deliveryAddressFor } from '../lib/studioTeam.js';
 
 // Health reading lives in lib/googleHealth.ts now, so `/me` and the choice of
 // studio source mailbox can read it without dragging the keep-alive (and the
@@ -252,7 +253,9 @@ async function emailTheDropped(dropped: Dropped[], healthyByOrg: Map<string, str
         url: reconnectConsentUrl(d.user_id, service),
         services: labels.length ? labels : undefined,
       });
-      await sendMessage(gmail, { to: person.email, subject: mail.subject, body: mail.text, html: mail.html });
+      // Write to where they actually read mail — a teammate with no studio
+      // mailbox (mailboxLess) would otherwise bounce every reconnect nudge.
+      await sendMessage(gmail, { to: deliveryAddressFor(person.email), subject: mail.subject, body: mail.text, html: mail.html });
       sent++;
 
       await supabaseAdmin.from('activity_log').insert({
