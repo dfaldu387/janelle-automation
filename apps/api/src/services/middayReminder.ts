@@ -219,8 +219,24 @@ export async function runMiddayReminder(orgId: string, slot: ReminderSlot = remi
       assigneeEmail: t.profiles?.email ?? null,
     }));
 
-  const { data: live } = await supabaseAdmin.from('tasks').select(columns).eq('org_id', orgId).in('status', LIVE_STATUSES);
-  let tasks = shape(live, false);
+  // Page through, exactly as the board's GET /tasks does: PostgREST caps a
+  // single response at 1000 rows, so an unpaginated query would silently drop
+  // live tasks once the studio has more than that — and the email would stop
+  // matching the board it links to. Both sides must load the whole set.
+  const PAGE = 1000;
+  const liveRows: unknown[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data } = await supabaseAdmin
+      .from('tasks')
+      .select(columns)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES)
+      .range(from, from + PAGE - 1);
+    const batch = data ?? [];
+    liveRows.push(...batch);
+    if (batch.length < PAGE) break;
+  }
+  let tasks = shape(liveRows, false);
 
   if (slot === 'evening') {
     const { data: finished } = await supabaseAdmin
