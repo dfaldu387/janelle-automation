@@ -2,7 +2,7 @@ import { TASK_CATEGORY_LABELS, defaultTaskCategory, type TaskCategory } from '@j
 import { hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { orgSourceUserId } from '../lib/tokens.js';
-import { isStudioMailbox } from '../lib/studioTeam.js';
+import { deliveryAddressFor, isStudioMailbox } from '../lib/studioTeam.js';
 import { pacificDate, pacificDayStart, pacificHourNow } from '../lib/pacificTime.js';
 import { gmailFor, sendMessage } from './gmail.js';
 import {
@@ -285,7 +285,9 @@ export async function runMiddayReminder(orgId: string, slot: ReminderSlot = remi
     }
     const mail = middayPersonalEmail({ name, slot, plan, boardUrl, checkinUrl });
     try {
-      await sendMessage(gmail, { to: email, subject: mail.subject, body: mail.text, html: mail.html });
+      // A teammate whose studio address has no mailbox (see mailboxLess) reads
+      // at their personal address; sending to the studio address bounces.
+      await sendMessage(gmail, { to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
       personal++;
     } catch (err) {
       console.error('[midday] personal reminder failed for', name, (err as Error).message);

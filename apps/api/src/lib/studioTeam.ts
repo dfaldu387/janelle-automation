@@ -27,8 +27,15 @@ export interface StudioPerson {
   seat: Seat | null;
   /** Other spellings people use for them, in documents or aloud. */
   aliases?: string[];
-  /** Other addresses they write from. */
+  /** Other addresses they write from — and, when `mailboxLess`, read at. */
   otherEmails?: string[];
+  /**
+   * Their `@studio` address is an identity label with no real mailbox behind
+   * it: mail sent there bounces ("Address not found"). Reminders and nudges
+   * must go to their personal address (`otherEmails[0]`) instead. Their
+   * `email` stays the studio address so name/address matching is unchanged.
+   */
+  mailboxLess?: boolean;
 }
 
 /** How the studio names itself on paper. */
@@ -65,8 +72,8 @@ export const STUDIO_MAILBOXES = ['systems@janelleinteriors.com'];
 export const STUDIO_TEAM: StudioPerson[] = [
   { name: 'Janelle Kandziora', email: 'janelle@janelleinteriors.com', seat: 'owner' },
   { name: 'Carissa Kolbeck', email: 'carissa@janelleinteriors.com', seat: 'operations' },
-  { name: 'Joanna Ramos', email: 'joanna@janelleinteriors.com', seat: 'pm_support', otherEmails: ['ramos.joannaeve@gmail.com'] },
-  { name: 'Victoria Manayan', email: 'victoria@janelleinteriors.com', seat: 'technical_production', otherEmails: ['manayan.victoriam@gmail.com'] },
+  { name: 'Joanna Ramos', email: 'joanna@janelleinteriors.com', seat: 'pm_support', otherEmails: ['ramos.joannaeve@gmail.com'], mailboxLess: true },
+  { name: 'Victoria Manayan', email: 'victoria@janelleinteriors.com', seat: 'technical_production', otherEmails: ['manayan.victoriam@gmail.com'], mailboxLess: true },
   { name: 'Adeleigh McGee', email: 'adeleigh@janelleinteriors.com', seat: 'hotel_ffe', aliases: ['Adelaide McGee'] },
   { name: 'Brianna Johnson', email: 'brianna@janelleinteriors.com', seat: 'design' },
 ];
@@ -77,6 +84,23 @@ export function addressOf(raw: string | null | undefined): string {
   const angled = text.match(/<([^>]+)>/);
   const address = (angled ? angled[1] : text).trim().toLowerCase();
   return address.includes('@') ? address : '';
+}
+
+/**
+ * The address that actually receives mail for a recipient.
+ *
+ * Most teammates read their studio address. A few have none — their
+ * `@studio` address is a label with no mailbox — and must be written to at
+ * their personal address, or every reminder bounces. Anyone the list does
+ * not know, or knows to have a real mailbox, is returned unchanged.
+ */
+export function deliveryAddressFor(raw: string | null | undefined): string {
+  const address = addressOf(raw);
+  if (address) {
+    const person = STUDIO_TEAM.find((p) => p.email === address || p.otherEmails?.includes(address));
+    if (person?.mailboxLess && person.otherEmails?.length) return person.otherEmails[0];
+  }
+  return (raw ?? '').trim();
 }
 
 export function isStudioMailbox(raw: string | null | undefined): boolean {
