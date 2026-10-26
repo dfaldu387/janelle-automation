@@ -1,4 +1,8 @@
 {
+  "framework": null,
+  "installCommand": "echo skip-install",
+  "buildCommand": "mkdir -p public && printf '<!doctype html><meta charset=\"utf-8\"><title>Redirecting</title><p>Redirecting to <a href=\"https://janelle.dev-build.in/\">janelle.dev-build.in</a>.' > public/index.html",
+  "outputDirectory": "public",
   "redirects": [
     { "source": "/(.*)", "destination": "https://janelle.dev-build.in/$1", "permanent": true }
   ]
