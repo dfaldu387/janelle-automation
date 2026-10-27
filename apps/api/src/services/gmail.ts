@@ -448,6 +448,56 @@ export async function readSentMail(
   return { byAddress, byThread };
 }
 
+export interface SentActivity {
+  /** Messages the person sent in the window, capped at `cap`. */
+  sent: number;
+  /** True when the window held more than `cap` — the real number is higher. */
+  capped: boolean;
+  /** Distinct threads they sent into — a rough count of conversations touched. */
+  threads: number;
+  /** When they last sent, or null if they sent nothing. */
+  lastSentAt: string | null;
+}
+
+/**
+ * A cheap read of how much a person sent from their own mailbox lately — the
+ * one real activity signal Gmail gives us (Drive edits need a scope we do not
+ * hold). Deliberately light: one list page for the count and thread spread,
+ * one metadata get for the most recent timestamp. It is a signal of activity,
+ * never a measure of hours — someone can think for an hour and send one line.
+ */
+export async function sentActivity(
+  gmail: gmail_v1.Gmail,
+  days: number,
+  cap = 100,
+): Promise<SentActivity> {
+  const res = await gmail.users.messages.list({
+    userId: 'me',
+    q: `in:sent newer_than:${Math.max(1, Math.round(days))}d`,
+    maxResults: cap,
+  });
+  const messages = res.data.messages ?? [];
+  const threads = new Set(messages.map((m) => m.threadId).filter(Boolean) as string[]);
+
+  let lastSentAt: string | null = null;
+  const newest = messages[0]?.id;
+  if (newest) {
+    try {
+      const msg = await gmail.users.messages.get({ userId: 'me', id: newest, format: 'metadata', metadataHeaders: [] });
+      if (msg.data.internalDate) lastSentAt = new Date(Number(msg.data.internalDate)).toISOString();
+    } catch {
+      // A missing timestamp costs only the "last active" line, not the count.
+    }
+  }
+
+  return {
+    sent: messages.length,
+    capped: Boolean(res.data.nextPageToken),
+    threads: threads.size,
+    lastSentAt,
+  };
+}
+
 /** List message ids matching a Gmail search query (e.g. "newer_than:2d"). */
 export async function listMessageIds(
   gmail: gmail_v1.Gmail,

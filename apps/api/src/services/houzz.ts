@@ -106,7 +106,10 @@ const COLUMNS: Record<string, string[]> = {
 };
 
 /** Which column index holds each field, by best header match. */
-function mapColumns(headers: string[]): {
+function mapColumns(
+  headers: string[],
+  spec: Record<string, string[]> = COLUMNS,
+): {
   index: Record<string, number>;
   mapped: Record<string, string>;
   unused: string[];
@@ -116,7 +119,7 @@ function mapColumns(headers: string[]): {
   const mapped: Record<string, string> = {};
   const claimed = new Set<number>();
 
-  for (const [field, candidates] of Object.entries(COLUMNS)) {
+  for (const [field, candidates] of Object.entries(spec)) {
     for (const candidate of candidates) {
       // Exact header first, then a header that contains the candidate, so
       // "Project Name (required)" still matches "projectname".
@@ -342,6 +345,232 @@ export async function importHouzzProjects(orgId: string, csv: string): Promise<H
     action: 'projects.houzz_import',
     entity: 'project',
     meta: { created: result.created, updated: result.updated, skipped: result.skipped, mapped, unusedColumns: unused },
+  });
+
+  return result;
+}
+
+// ── Tasks import ────────────────────────────────────────────
+//
+// Houzz Pro is where the studio keeps its "house" tasks, and the walkthrough
+// (Carissa, 2026-10-26) named the real cost: everyone works Houzz first, then
+// this board, and a request Janelle makes that nobody logs in Houzz is a task
+// the whole team is blind to. Houzz has no API, so — exactly like the project
+// list — the tasks come across as the CSV its task screen exports. Houzz stays
+// the source of truth; this reads a snapshot onto the board and never writes
+// back. The column names are a best-effort guess at the export's headers
+// (confirmed once a real file is seen); `mapped`/`unusedColumns` in the result
+// show what matched so a renamed header shows up rather than importing blanks.
+
+/** What each task field might be called in the export. Title deliberately does
+ * NOT list "description", so a separate description column is left for notes
+ * rather than mistaken for the task name. */
+const TASK_COLUMNS: Record<string, string[]> = {
+  title: ['taskname', 'task', 'todo', 'title', 'subject', 'activity', 'item', 'name'],
+  project: ['projectname', 'project', 'job', 'jobname', 'relatedproject', 'projecttitle'],
+  assignee: ['assignedto', 'assignee', 'owner', 'responsible', 'assigned', 'teammember', 'user'],
+  due: ['duedate', 'due', 'deadline', 'targetdate', 'completeby', 'date'],
+  status: ['status', 'state', 'taskstatus', 'progress', 'completed', 'iscomplete', 'done'],
+  priority: ['priority', 'importance', 'urgency'],
+  notes: ['notes', 'description', 'details', 'note', 'comment', 'comments'],
+};
+
+/** Houzz's own task words, mapped onto the board's statuses. */
+function toTaskStatus(value: string | undefined): 'open' | 'in_progress' | 'blocked' | 'done' | 'cancelled' {
+  const v = (value ?? '').toLowerCase();
+  if (/complete|closed|finish|done|resolved|\byes\b|\btrue\b|\bx\b|✓/.test(v)) return 'done';
+  if (/cancel|dead|void|dropped/.test(v)) return 'cancelled';
+  if (/block|hold|wait|stuck|pending|paused/.test(v)) return 'blocked';
+  if (/progress|started|doing|active|wip|underway|ongoing/.test(v)) return 'in_progress';
+  return 'open';
+}
+
+/** Compare task titles without caring about case, punctuation or spacing —
+ * the same flattening the project match uses, so a re-import of the same file
+ * lands on the same card instead of a second one. */
+function taskTitleKey(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+export interface HouzzTaskImportResult {
+  ok: boolean;
+  reason?: string;
+  /** Tasks added. */
+  created: number;
+  /** Tasks already on the board that the file updated (status, due, owner). */
+  updated: number;
+  /** Rows with no usable task title. */
+  skipped: number;
+  /** Assignee names in the file that matched no teammate; left unassigned. */
+  unmatchedAssignees: string[];
+  /** Which CSV column each field was read from, so a mismatch is visible. */
+  mapped: Record<string, string>;
+  /** Columns in the file nothing was read from. */
+  unusedColumns: string[];
+}
+
+/**
+ * Read a Houzz Pro task export onto the studio's task board.
+ *
+ * Runs safely more than once: a row is matched to what is already on the board
+ * by project + normalised title, so re-importing the same export updates the
+ * card rather than duplicating it, and a task the system had already raised
+ * from an email with the same title on the same job is adopted, not doubled.
+ * Houzz owns these tasks, so on a match the status it reports is taken; other
+ * fields are only written when the file actually carries them.
+ */
+export async function importHouzzTasks(orgId: string, csv: string): Promise<HouzzTaskImportResult> {
+  const empty = { created: 0, updated: 0, skipped: 0, unmatchedAssignees: [], mapped: {}, unusedColumns: [] };
+  if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', ...empty };
+
+  const rows = parseCsv(csv);
+  if (rows.length < 2) return { ok: false, reason: 'The file has no rows under its header.', ...empty };
+
+  const [headers, ...body] = rows;
+  const { index, mapped, unused } = mapColumns(headers, TASK_COLUMNS);
+  if (index.title === undefined) {
+    return {
+      ok: false,
+      reason: `No task-title column found. Columns in the file: ${headers.filter(Boolean).join(', ')}`,
+      ...empty,
+      unusedColumns: unused,
+    };
+  }
+
+  // Projects to file tasks under, and teammates to assign them to.
+  const { data: projectRows } = await supabaseAdmin
+    .from('projects')
+    .select('id, name, houzz_ref')
+    .eq('org_id', orgId);
+  const projects = (projectRows ?? []) as { id: string; name: string; houzz_ref: string | null }[];
+
+  const { data: profileRows } = await supabaseAdmin
+    .from('profiles')
+    .select('id, full_name, email')
+    .eq('org_id', orgId);
+  const profiles = (profileRows ?? []) as { id: string; full_name: string | null; email: string | null }[];
+
+  // Match an assignee name to a teammate: whole name first, then first name,
+  // then the local part of their email ("carissa" from carissa@…). Null when
+  // nothing matches, so a typo leaves the task unassigned rather than mis-owned.
+  const matchAssignee = (name: string): string | null => {
+    const n = name.trim().toLowerCase();
+    if (!n) return null;
+    const exact = profiles.find((p) => (p.full_name ?? '').trim().toLowerCase() === n);
+    if (exact) return exact.id;
+    const first = profiles.find((p) => (p.full_name ?? '').trim().toLowerCase().split(' ')[0] === n.split(' ')[0]);
+    if (first) return first.id;
+    const byEmail = profiles.find((p) => (p.email ?? '').split('@')[0].toLowerCase() === n.split(' ')[0]);
+    return byEmail?.id ?? null;
+  };
+
+  // The board as it stands — live work, plus anything closed recently, so a
+  // re-import updates rather than re-raises a card that was only just ticked.
+  const recent = new Date(Date.now() - 14 * 24 * 3600_000).toISOString();
+  const { data: existingRows } = await supabaseAdmin
+    .from('tasks')
+    .select('id, title, status, project_id, due_date, assigned_to, detail')
+    .eq('org_id', orgId)
+    .or(`status.in.(open,in_progress,blocked),updated_at.gte.${recent}`);
+  const existing = (existingRows ?? []) as {
+    id: string; title: string; status: string; project_id: string | null;
+    due_date: string | null; assigned_to: string | null; detail: string | null;
+  }[];
+
+  const result: HouzzTaskImportResult = {
+    ok: true, created: 0, updated: 0, skipped: 0, unmatchedAssignees: [], mapped, unusedColumns: unused,
+  };
+  const unmatched = new Set<string>();
+
+  for (const row of body) {
+    const cell = (field: string) => (index[field] === undefined ? undefined : row[index[field]]?.trim());
+
+    const title = cell('title');
+    if (!title) {
+      result.skipped++;
+      continue;
+    }
+
+    // The job this task is filed under: Houzz id first (when the export carries
+    // one that lines up with an imported project), else the project name.
+    const projectName = cell('project');
+    const projectId = projectName
+      ? matchProjectId(projects as unknown as { id: string; name: string }[], projectName)
+      : null;
+
+    const status = toTaskStatus(cell('status'));
+    const due = toDate(cell('due'));
+    const assigneeName = cell('assignee') ?? '';
+    const assignedTo = assigneeName ? matchAssignee(assigneeName) : null;
+    if (assigneeName && !assignedTo) unmatched.add(assigneeName);
+
+    const priority = cell('priority');
+    const note = cell('notes');
+    const detail = [note || null, priority ? `Priority: ${priority}` : null].filter(Boolean).join('\n\n') || null;
+
+    // Same job and the same title, however it is cased or punctuated.
+    const key = taskTitleKey(title);
+    const hit = existing.find(
+      (t) => taskTitleKey(t.title) === key && (t.project_id === projectId || t.project_id === null || projectId === null),
+    );
+
+    try {
+      if (hit) {
+        const patch: Record<string, unknown> = {};
+        // Houzz owns these tasks, so its status wins; the rest only fill gaps
+        // the file actually carries, never blanking what the board already has.
+        if (hit.status !== status) patch.status = status;
+        if (due && hit.due_date !== due) patch.due_date = due;
+        if (assignedTo && hit.assigned_to !== assignedTo) patch.assigned_to = assignedTo;
+        if (detail && !hit.detail) patch.detail = detail;
+        if (projectId && hit.project_id === null) patch.project_id = projectId;
+
+        if (Object.keys(patch).length) {
+          const { error } = await supabaseAdmin.from('tasks').update(patch).eq('id', hit.id).eq('org_id', orgId);
+          if (error) throw new Error(error.message);
+          result.updated++;
+          Object.assign(hit, patch);
+        }
+      } else {
+        const { data, error } = await supabaseAdmin
+          .from('tasks')
+          .insert({
+            org_id: orgId,
+            title: title.slice(0, 200),
+            detail,
+            kind: 'admin',
+            status,
+            assigned_to: assignedTo,
+            project_id: projectId,
+            due_date: due,
+            // Houzz tasks have no originating email; the column is nullable
+            // precisely for board tasks raised outside the inbox.
+            source_email_id: null,
+          })
+          .select('id, title, status, project_id, due_date, assigned_to, detail')
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        result.created++;
+        // Keep the in-memory board current so two rows naming the same task in
+        // one file land on one card.
+        if (data) existing.push(data as (typeof existing)[number]);
+      }
+    } catch (err) {
+      console.error('[houzz] task row failed', title, (err as Error).message);
+      result.skipped++;
+    }
+  }
+
+  result.unmatchedAssignees = [...unmatched];
+
+  await supabaseAdmin.from('activity_log').insert({
+    org_id: orgId,
+    action: 'tasks.houzz_import',
+    entity: 'task',
+    meta: {
+      created: result.created, updated: result.updated, skipped: result.skipped,
+      unmatchedAssignees: result.unmatchedAssignees, mapped, unusedColumns: unused,
+    },
   });
 
   return result;

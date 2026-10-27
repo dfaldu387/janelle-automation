@@ -7,9 +7,9 @@ import { useAuth } from '../context/AuthContext';
 import { useTable, SortTh, SearchInput, FilterSelect, TableToolbar, TablePager, matches } from '../components/table';
 import { startImpersonation } from '../lib/impersonate';
 import {
-  useAddTeamMember, useEditTeamMember, useRemoveTeamMember, useResetMemberPassword, useSendInvite, useSetMemberDisabled,
-  useSetRole, useTeam, useTeamAbilities,
-  type AddedMember, type PasswordReset, type TeamMember,
+  useAddTeamMember, useDraftConnectInvites, useEditTeamMember, useRemoveTeamMember, useResetMemberPassword, useSendInvite, useSetMemberDisabled,
+  useSetRole, useTeam, useTeamAbilities, useTeamActivity, useSendTeamActivity,
+  type AddedMember, type PasswordReset, type TeamMember, type TeamActivityPerson,
 } from '../lib/queries';
 
 
@@ -777,7 +777,193 @@ function PersonRow({
   );
 }
 
+/**
+ * Draft "connect your Google" invites for everyone set up but not connected.
+ *
+ * The drafts land in the studio mailbox for review — nothing is sent, so the
+ * person who runs the studio reads each (and drops any for a teammate who has
+ * since left) before it goes. Ordered most-open-work first, so the invite that
+ * matters most is on top. Safe to press again: anyone drafted in the last week
+ * is skipped rather than drafted twice.
+ */
+function DraftConnectInvites() {
+  const draft = useDraftConnectInvites();
+  const [msg, setMsg] = useState<{ text: string; tone: 'good' | 'crit' } | null>(null);
+
+  const run = () => {
+    setMsg(null);
+    draft.mutate(undefined, {
+      onSuccess: (d) => {
+        if (!d.ok) {
+          const why =
+            d.reason === 'no_source_mailbox'
+              ? 'No studio mailbox is connected to draft from.'
+              : d.reason ?? 'Could not draft the invites.';
+          return setMsg({ text: why, tone: 'crit' });
+        }
+        if (!d.drafted && !d.skippedRecent) return setMsg({ text: 'Everyone is already connected — nothing to draft.', tone: 'good' });
+        const who = d.people.length ? ` For: ${d.people.map((p) => p.name).join(', ')}.` : '';
+        const skip = d.skippedRecent ? ` ${d.skippedRecent} skipped (drafted in the last week).` : '';
+        setMsg({
+          text: d.drafted
+            ? `Drafted ${d.drafted} invite${d.drafted === 1 ? '' : 's'} in the studio mailbox — review and send from Gmail.${who}${skip}`
+            : `Nothing new to draft.${skip}`,
+          tone: 'good',
+        });
+      },
+      onError: (e) => setMsg({ text: (e as Error).message, tone: 'crit' }),
+    });
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        onClick={run}
+        disabled={draft.isPending}
+        className="btn-secondary btn-sm"
+        title="Writes a connect-your-Gmail draft into the studio mailbox for each unconnected teammate. Nothing is sent — you review and send from Gmail."
+      >
+        {draft.isPending ? 'Drafting…' : 'Draft connect invites'}
+      </button>
+      {msg && (
+        <span className={`max-w-md text-right text-[12px] ${msg.tone === 'crit' ? 'text-crit' : 'text-ink-faint'}`}>
+          {msg.text}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** "2026-10-24" / ISO → "Oct 24", or "—" when there is nothing. */
+function sentDay(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function emailsText(p: TeamActivityPerson): string {
+  if (!p.connected) return 'not connected';
+  if (p.emailsSent === null) return '—';
+  return `${p.emailsSent}${p.emailsCapped ? '+' : ''}`;
+}
+
+/**
+ * The weekly per-person activity digest, on demand — mail each teammate sent and
+ * how their task load moved, to set against reported hours. Principal-only, and
+ * explicit that these are activity signals, not a measure of hours (Drive is a
+ * blind spot). Collapsed by default because it reads Gmail live for each person.
+ */
+function TeamActivityPanel() {
+  const [open, setOpen] = useState(false);
+  const activity = useTeamActivity(open);
+  const send = useSendTeamActivity();
+  const [msg, setMsg] = useState<{ text: string; tone: 'good' | 'crit' } | null>(null);
+
+  const emailNow = () => {
+    setMsg(null);
+    send.mutate(undefined, {
+      onSuccess: (d) => {
+        if (!d.ok) {
+          const why =
+            d.reason === 'no_source_mailbox'
+              ? 'No studio mailbox is connected to send from.'
+              : d.reason === 'no_owner'
+                ? 'No principal with an email is set up to send to.'
+                : d.reason ?? 'Could not send the digest.';
+          return setMsg({ text: why, tone: 'crit' });
+        }
+        setMsg(
+          d.ownersSent
+            ? { text: `Emailed to the owner${d.ownersSent === 1 ? '' : 's'} — check your inbox.`, tone: 'good' }
+            : { text: 'Nobody to report on yet.', tone: 'good' },
+        );
+      },
+      onError: (e) => setMsg({ text: (e as Error).message, tone: 'crit' }),
+    });
+  };
+
+  const people = activity.data?.people ?? [];
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line-soft px-5 py-3.5">
+        <div>
+          <h2 className="text-[15px] font-semibold text-ink">Team activity this week</h2>
+          <p className="text-[12px] text-ink-faint">Mail sent and how task load moved — signals to read against reported hours, not hours themselves.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {open && (
+            <button onClick={emailNow} disabled={send.isPending} className="btn-secondary btn-sm" title="Email this week's digest to the studio owner now.">
+              {send.isPending ? 'Sending…' : 'Email it to me'}
+            </button>
+          )}
+          <button onClick={() => setOpen((v) => !v)} className="btn-ghost btn-sm">
+            {open ? 'Hide' : 'Show'}
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <>
+          {msg && (
+            <div className={`px-5 pt-3 text-[12.5px] ${msg.tone === 'crit' ? 'text-crit' : 'text-ink-faint'}`}>{msg.text}</div>
+          )}
+
+          {activity.isLoading && <div className="px-5 py-8 text-center text-[13px] text-ink-faint">Reading each connected mailbox…</div>}
+          {activity.isError && <div className="px-5 py-8 text-center text-[13px] text-crit">Could not load activity.</div>}
+
+          {!activity.isLoading && !activity.isError && (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[680px] border-collapse text-left">
+                  <thead>
+                    <tr className="border-b border-line-soft bg-sunk/40 text-[11px] uppercase tracking-[0.08em] text-ink-faint">
+                      <th className="py-2.5 pl-5 pr-3 font-semibold">Person</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Emails sent</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Done</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Open</th>
+                      <th className="px-3 py-2.5 text-right font-semibold">Overdue</th>
+                      <th className="py-2.5 pl-3 pr-5 text-right font-semibold">Last sent</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-line-soft">
+                    {people.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="px-5 py-8 text-center text-[13px] text-ink-faint">Nobody to report on yet.</td>
+                      </tr>
+                    )}
+                    {people.map((p) => (
+                      <tr key={p.id} className="text-[13px]">
+                        <td className="py-2.5 pl-5 pr-3 font-medium text-ink">{p.name}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${p.connected ? 'text-ink' : 'text-ink-faint'}`}>{emailsText(p)}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${p.tasksCompleted ? 'text-good' : 'text-ink-faint'}`}>{p.tasksCompleted}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums text-ink">{p.tasksOpen}</td>
+                        <td className={`px-3 py-2.5 text-right tabular-nums ${p.tasksOverdue ? 'font-semibold text-crit' : 'text-ink-faint'}`}>{p.tasksOverdue}</td>
+                        <td className="py-2.5 pl-3 pr-5 text-right text-ink-soft">{sentDay(p.lastSentAt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {activity.data?.notes?.length ? (
+                <ul className="border-t border-line-soft px-5 py-3 text-[12px] leading-relaxed text-ink-faint">
+                  {activity.data.notes.map((n, i) => (
+                    <li key={i} className="before:mr-1.5 before:content-['•']">{n}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
 export default function Team() {
+  const { profile } = useAuth();
+  const isPrincipal = profile?.role === 'principal';
   const { data: team, isLoading } = useTeam();
   const { data: can } = useTeamAbilities();
   const [adding, setAdding] = useState(false);
@@ -845,6 +1031,7 @@ export default function Team() {
                 {googleConnected < team.length && (
                   <span className="hidden text-ink-faint md:inline">Mail is only read for people who have connected.</span>
                 )}
+                {manages && googleConnected < team.length && <DraftConnectInvites />}
               </div>
             )}
           </div>
@@ -954,6 +1141,8 @@ export default function Team() {
             </div>
           )}
         </Card>
+
+        {isPrincipal && <TeamActivityPanel />}
 
         <Card>
           <div className="border-b border-line-soft px-5 py-4">

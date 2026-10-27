@@ -13,7 +13,7 @@ import { ASSISTANT_NAME, ROLE_LABELS, canSupervise, type Resource } from '@janel
 import {
   IconDashboard, IconProjects, IconVendors, IconDoc,
   IconPrompt, IconBell, IconInbox, IconTask, IconAssistant, IconSettings, IconDraft, IconSun, IconMoon,
-  IconLogout, IconArrow, IconActivity,
+  IconLogout, IconArrow, IconActivity, IconCalendar,
 } from './icons';
 
 const PINNED_KEY = 'janelle.sidebar.pinned';
@@ -77,6 +77,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     title: 'Automation',
     items: [
       { to: '/follow-ups', label: 'Top Priority Actions', Icon: IconBell, needs: 'follow_ups', hue: 'amber' },
+      { to: '/daily', label: 'Daily Report', Icon: IconCalendar, supervisorOnly: true, hue: 'green' },
       { to: '/assistant', label: ASSISTANT_NAME, Icon: IconAssistant, hue: 'violet' },
       { to: '/tasks', label: 'Tasks', Icon: IconTask, needs: 'tasks', hue: 'sky' },
       { to: '/inbox', label: 'Inbox', Icon: IconInbox, needs: 'emails', hue: 'teal' },
@@ -114,6 +115,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/tasks': 'Tasks',
   '/follow-ups': 'Top Priority Actions',
   '/drafts': 'Drafts',
+  '/daily': 'Daily Report',
   '/reports': 'Reports',
   '/activity': 'Audit Log',
   '/jenny-assistant': 'Audit Chat',

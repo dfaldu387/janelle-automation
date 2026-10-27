@@ -1394,6 +1394,217 @@ export function useImportHouzz() {
   });
 }
 
+export interface HouzzTaskImportResult {
+  ok: boolean;
+  reason?: string;
+  created: number;
+  updated: number;
+  skipped: number;
+  /** Assignee names in the file that matched no teammate. */
+  unmatchedAssignees: string[];
+  /** Which CSV column each field was read from. */
+  mapped: Record<string, string>;
+  /** Columns in the file nothing was read from. */
+  unusedColumns: string[];
+}
+
+/**
+ * Load a Houzz Pro task export onto the board.
+ *
+ * Houzz has no API for a studio's own tasks either, so the CSV its task screen
+ * exports is the route. Safe to run again: rows match on project + title, so a
+ * re-import updates the card rather than duplicating it.
+ */
+export function useImportHouzzTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (csv: string) =>
+      api<HouzzTaskImportResult>('/ops/import-houzz-tasks', { method: 'POST', body: JSON.stringify({ csv }) }),
+    onSuccess: () => {
+      for (const key of ['tasks', 'board', 'dashboard', 'activity']) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
+}
+
+export interface ConnectInviteResult {
+  ok: boolean;
+  reason?: string;
+  drafted: number;
+  skippedRecent: number;
+  people: { name: string; email: string; liveTasks: number }[];
+}
+
+/**
+ * Draft "connect your Google" invites for teammates who are set up but have
+ * never connected. The drafts land in the studio mailbox for review — nothing
+ * is sent. Safe to run again: anyone drafted in the last week is skipped.
+ */
+export function useDraftConnectInvites() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<ConnectInviteResult>('/ops/draft-connect-invites', { method: 'POST' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['activity'] }),
+  });
+}
+
+export interface TeamActivityPerson {
+  id: string;
+  name: string;
+  email: string;
+  /** Whether their Gmail is connected — email figures are blank when it is not. */
+  connected: boolean;
+  /** Messages sent in the window, or null when the mailbox is not connected/readable. */
+  emailsSent: number | null;
+  /** True when the real number is higher than the figure shown. */
+  emailsCapped: boolean;
+  threads: number | null;
+  lastSentAt: string | null;
+  tasksCompleted: number;
+  tasksOpen: number;
+  tasksOverdue: number;
+}
+
+export interface TeamActivity {
+  generatedAt: string;
+  days: number;
+  people: TeamActivityPerson[];
+  /** Standing caveats — these are activity signals, not hours; Drive is not seen. */
+  notes: string[];
+}
+
+/**
+ * The weekly per-person activity digest — mail sent and how task load moved,
+ * per teammate. Owner-only (the API gates it to the principal). Reads Gmail
+ * live, so it is deliberately only fetched when the panel asks for it.
+ */
+export function useTeamActivity(enabled = true) {
+  return useQuery({
+    queryKey: ['team-activity'],
+    queryFn: () => api<TeamActivity>('/ops/team-activity'),
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export interface TeamActivitySent {
+  ok: boolean;
+  reason?: string;
+  ownersSent: number;
+  people: number;
+}
+
+/** Email the activity digest to the owner now, rather than waiting for Monday. */
+export function useSendTeamActivity() {
+  return useMutation({ mutationFn: () => api<TeamActivitySent>('/ops/team-activity/send', { method: 'POST' }) });
+}
+
+export type HygieneReason = 'assignee_gone' | 'stale';
+
+export interface HygieneTask {
+  id: string;
+  title: string;
+  assignee: string | null;
+  project: string | null;
+  dueDate: string | null;
+  ageDays: number;
+  reason: HygieneReason;
+}
+
+export interface TaskHygiene {
+  total: number;
+  candidates: HygieneTask[];
+  counts: Record<HygieneReason, number>;
+  staleDays: number;
+}
+
+/**
+ * Why the open count is what it is, and which tasks a cleanup would clear —
+ * assignees who have left, and tasks untouched for too long. Plain rules, read
+ * on demand for the board's cleanup panel.
+ */
+export function useTaskHygiene(enabled = true) {
+  return useQuery({
+    queryKey: ['task-hygiene'],
+    queryFn: () => api<TaskHygiene>('/ops/task-hygiene'),
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+export interface DailyItem {
+  id: string;
+  title: string;
+  project: string | null;
+  assignee: string | null;
+  due: string | null;
+  overdue: boolean;
+  blocked: boolean;
+  /** Link to the originating Gmail thread, when the task came from one. */
+  emailUrl: string | null;
+}
+
+export interface DailyFollowUp {
+  type: string;
+  reason: string | null;
+  project: string | null;
+  vendor: string | null;
+}
+
+export interface DailyActivity {
+  connected: boolean;
+  emailsSent: number | null;
+  lastSentAt: string | null;
+}
+
+export interface DailyPerson {
+  id: string;
+  name: string;
+  completedToday: DailyItem[];
+  pending: DailyItem[];
+  activity: DailyActivity;
+}
+
+export interface DailyReportData {
+  date: string;
+  generatedAt: string;
+  fires: { blocked: DailyItem[]; overdue: DailyItem[]; followUps: DailyFollowUp[] };
+  people: DailyPerson[];
+  unassignedPending: DailyItem[];
+  notes: string[];
+}
+
+/**
+ * The daily report in Janelle's layout — fires first, then each person's
+ * completed-today / still-pending with Gmail links and an activity read. Reads
+ * Gmail live for the activity line, so it is fetched on demand and cached.
+ */
+export function useDailyReport() {
+  return useQuery({
+    queryKey: ['daily-report'],
+    queryFn: () => api<DailyReportData>('/ops/daily-report'),
+    staleTime: 2 * 60_000,
+  });
+}
+
+/** Clear the chosen tasks (set to cancelled, reversible). */
+export function useCloseStaleTasks() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) =>
+      api<{ ok: boolean; reason?: string; closed: number }>('/ops/close-stale-tasks', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      }),
+    onSuccess: () => {
+      for (const key of ['tasks', 'board', 'dashboard', 'activity', 'task-hygiene']) {
+        qc.invalidateQueries({ queryKey: [key] });
+      }
+    },
+  });
+}
+
 /**
  * Change a task's status, or hand it to someone else.
  *

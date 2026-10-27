@@ -3,7 +3,11 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { backfillEmailBodies, refileFromAttachments, runIngest } from '../services/ingest.js';
 import { autoMergeDuplicates, promoteAll, removeVendorProjects } from '../services/promote.js';
-import { importHouzzProjects } from '../services/houzz.js';
+import { importHouzzProjects, importHouzzTasks } from '../services/houzz.js';
+import { draftConnectInvites } from '../services/onboarding.js';
+import { buildTeamActivity, runTeamActivityDigest } from '../services/teamActivity.js';
+import { reviewTaskHygiene, closeStaleTasks } from '../services/taskCleanup.js';
+import { buildDailyReport } from '../services/dailyReport.js';
 import { runFollowUps, resolveFollowUps } from '../services/followups.js';
 import { runReport } from '../services/report.js';
 import { runDigest } from '../services/digest.js';
@@ -18,7 +22,7 @@ import { runSlackReport } from '../services/slackReport.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { claimCronSlot } from '../lib/cronSlot.js';
-import { pacificHourNow } from '../lib/pacificTime.js';
+import { pacificHourNow, pacificWeekday } from '../lib/pacificTime.js';
 import {
   INGEST_RAN_FIELD,
   MIDDAY_REMINDER_COOLDOWN_MS,
@@ -31,6 +35,10 @@ import {
   SLACK_REPORT_HOURS,
   SLACK_REPORT_RAN_FIELD,
   TASK_REVIEW_RAN_FIELD,
+  TEAM_ACTIVITY_COOLDOWN_MS,
+  TEAM_ACTIVITY_HOUR,
+  TEAM_ACTIVITY_RAN_FIELD,
+  TEAM_ACTIVITY_WEEKDAY,
 } from '../lib/cronJobs.js';
 
 export const opsRouter = Router();
@@ -209,10 +217,12 @@ cronRouter.all(
     });
   }),
 );
-// The daily Slack reminder (migration 0028). No longer scheduled — the task reports
-// replaced it — but kept for running by hand. The
-// Pacific-hour gate and the claim keep it to one post a day, and the hour is
-// wall-clock so it stays at 9am across the PST/PDT change. `?force=1` posts now.
+// The daily Slack morning briefing (migration 0028). Scheduled again in
+// services/scheduler.ts at SLACK_DIGEST_HOUR (8am Pacific) after the founder
+// asked to receive it in her morning rather than open the app; this route is
+// the pg_cron twin and also runs it by hand. The Pacific-hour gate and the
+// claim keep it to one post a day, and the hour is wall-clock so it holds
+// across the PST/PDT change. `?force=1` posts now.
 cronRouter.all(
   '/slack-digest',
   asyncHandler(async (req, res) => {
@@ -226,6 +236,30 @@ cronRouter.all(
           }
         }
         return runSlackDigest(id);
+      }),
+    });
+  }),
+);
+// The weekly per-person activity digest to the owner. Scheduled in
+// services/scheduler.ts for Monday 7am Pacific; this is the pg_cron twin and
+// also runs it by hand. Gated to the one Pacific weekday + hour and claimed so
+// it posts once a week, wall-clock so it holds across the PST/PDT change.
+// `?force=1` sends now.
+cronRouter.all(
+  '/team-activity',
+  asyncHandler(async (req, res) => {
+    const force = req.query.force === '1';
+    res.json({
+      data: await forEachOrg(async (id) => {
+        if (!force) {
+          if (pacificWeekday() !== TEAM_ACTIVITY_WEEKDAY || pacificHourNow() !== TEAM_ACTIVITY_HOUR) {
+            return { ok: true, skipped: 'not_digest_time' };
+          }
+          if (!(await claimCronSlot(id, TEAM_ACTIVITY_RAN_FIELD, TEAM_ACTIVITY_COOLDOWN_MS))) {
+            return { ok: true, skipped: 'already_sent' };
+          }
+        }
+        return runTeamActivityDigest(id);
       }),
     });
   }),
@@ -267,6 +301,80 @@ opsRouter.post(
   }),
 );
 
+// Draft a "connect your Google" invite for every teammate who is set up but
+// has never connected — written into the studio mailbox for review, never sent.
+// Ordered most-open-work first (principal / coordinator only).
+opsRouter.post(
+  '/draft-connect-invites',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await draftConnectInvites(req.auth!.orgId) });
+  }),
+);
+
+// The weekly per-person activity digest, read on demand. Owner-only: this is
+// staff-performance data, so it is gated to the principal, not the coordinator.
+// GET returns the week's figures for the Team page; the figures are activity
+// signals (mail sent, how task load moved), never a measure of hours.
+opsRouter.get(
+  '/team-activity',
+  requireRole('principal'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    const days = Number(req.query.days);
+    res.json({ data: await buildTeamActivity(req.auth!.orgId, Number.isFinite(days) && days > 0 ? days : 7) });
+  }),
+);
+
+// Email that same digest to the owner now, rather than waiting for Monday.
+opsRouter.post(
+  '/team-activity/send',
+  requireRole('principal'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await runTeamActivityDigest(req.auth!.orgId) });
+  }),
+);
+
+// The daily report in Janelle's layout: fires/blockers first, then each
+// teammate's completed-today / still-pending with Gmail links and an activity
+// read. Supervisor view (principal / coordinator) — it is a management summary.
+opsRouter.get(
+  '/daily-report',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await buildDailyReport(req.auth!.orgId) });
+  }),
+);
+
+// Why the open-task count is what it is, and what a cleanup would clear. Plain
+// rules, no AI — tasks whose assignee has left, and tasks untouched for too
+// long, which the email-driven auto-closer never reaches (Janelle's "167 open?"
+// 2026-10-27). Read on demand for the board's cleanup panel.
+opsRouter.get(
+  '/task-hygiene',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await reviewTaskHygiene(req.auth!.orgId) });
+  }),
+);
+
+// Clear the chosen tasks — set to cancelled, kept and reversible, never deleted.
+opsRouter.post(
+  '/close-stale-tasks',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    const ids = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]).filter((x): x is string => typeof x === 'string') : [];
+    if (!ids.length) return res.status(400).json({ error: 'No task ids were sent' });
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+    res.json({ data: await closeStaleTasks(req.auth!.orgId, ids, note) });
+  }),
+);
+
 // Backfill: promote existing parsed emails + documents into vendors,
 // projects and purchase orders (principal / coordinator only).
 opsRouter.post(
@@ -290,6 +398,21 @@ opsRouter.post(
     const csv = typeof req.body?.csv === 'string' ? req.body.csv : '';
     if (!csv.trim()) return res.status(400).json({ error: 'No CSV content was sent' });
     res.json({ data: await importHouzzProjects(req.auth!.orgId, csv) });
+  }),
+);
+
+// Bring the "house" task list over from a Houzz Pro CSV export. Same rationale
+// as the project import: Houzz has no API, stays the source of truth, and is
+// never written back to. Tasks land on the board so the team sees house work
+// here instead of only in Houzz (Carissa walkthrough, 2026-10-26).
+opsRouter.post(
+  '/import-houzz-tasks',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    const csv = typeof req.body?.csv === 'string' ? req.body.csv : '';
+    if (!csv.trim()) return res.status(400).json({ error: 'No CSV content was sent' });
+    res.json({ data: await importHouzzTasks(req.auth!.orgId, csv) });
   }),
 );
 

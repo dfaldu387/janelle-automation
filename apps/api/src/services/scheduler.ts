@@ -11,17 +11,26 @@ import { sweepJobs } from './mediaJobs.js';
 import { keepGoogleAlive } from './googleKeepalive.js';
 import { runMiddayReminder } from './middayReminder.js';
 import { runSlackReport } from './slackReport.js';
+import { runSlackDigest } from './slackDigest.js';
 import { runSlackSync } from './slackSync.js';
-import { pacificHourNow } from '../lib/pacificTime.js';
+import { runTeamActivityDigest } from './teamActivity.js';
+import { pacificHourNow, pacificWeekday } from '../lib/pacificTime.js';
 import {
   INGEST_RAN_FIELD,
   MIDDAY_REMINDER_COOLDOWN_MS,
   MIDDAY_REMINDER_HOURS,
   MIDDAY_REMINDER_RAN_FIELD,
+  SLACK_DIGEST_COOLDOWN_MS,
+  SLACK_DIGEST_HOUR,
+  SLACK_DIGEST_RAN_FIELD,
   SLACK_REPORT_COOLDOWN_MS,
   SLACK_REPORT_HOURS,
   SLACK_REPORT_RAN_FIELD,
   TASK_REVIEW_RAN_FIELD,
+  TEAM_ACTIVITY_COOLDOWN_MS,
+  TEAM_ACTIVITY_HOUR,
+  TEAM_ACTIVITY_RAN_FIELD,
+  TEAM_ACTIVITY_WEEKDAY,
 } from '../lib/cronJobs.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
@@ -128,6 +137,20 @@ export function startScheduler(): void {
     forEachOrg((id) => runSlackSync(id, { budgetMs: 35_000 }), 'slack sync'),
   );
 
+  // The morning briefing to Slack — the prioritised "what needs you today"
+  // read, posted once at 8am Pacific so it is waiting when the studio arrives
+  // and leads the 9am task reports below. Silent when there is nothing to say.
+  // The founder asked to get this in her morning rather than open the app for
+  // it (Carissa walkthrough, 2026-10-26); buildDigest only ever surfaced it
+  // in-app, so this is the push that actually delivers it.
+  every('*/15 * * * *', 'slack digest', async () => {
+    if (pacificHourNow() !== SLACK_DIGEST_HOUR) return;
+    await forEachOrg(async (id) => {
+      if (!(await claimCronSlot(id, SLACK_DIGEST_RAN_FIELD, SLACK_DIGEST_COOLDOWN_MS))) return;
+      await runSlackDigest(id);
+    }, 'slack digest');
+  });
+
   // The completed / pending / overdue reports to their Slack channels, at
   // 9am, midday and 5pm Pacific.
   every('*/15 * * * *', 'slack report', async () => {
@@ -136,6 +159,20 @@ export function startScheduler(): void {
       if (!(await claimCronSlot(id, SLACK_REPORT_RAN_FIELD, SLACK_REPORT_COOLDOWN_MS))) return;
       await runSlackReport(id);
     }, 'slack report');
+  });
+
+  // The weekly per-person activity digest to the owner — Monday 7am Pacific,
+  // so the week opens with last week's picture of who sent what and how task
+  // load moved. Gated like the Slack briefing (poll often, fire on the one
+  // Pacific slot) rather than a fixed UTC time, because "Monday 7am in Ojai"
+  // drifts against UTC across the daylight-saving change. Owner-only; silent
+  // when there is no one to report on.
+  every('*/15 * * * *', 'team activity', async () => {
+    if (pacificWeekday() !== TEAM_ACTIVITY_WEEKDAY || pacificHourNow() !== TEAM_ACTIVITY_HOUR) return;
+    await forEachOrg(async (id) => {
+      if (!(await claimCronSlot(id, TEAM_ACTIVITY_RAN_FIELD, TEAM_ACTIVITY_COOLDOWN_MS))) return;
+      await runTeamActivityDigest(id);
+    }, 'team activity');
   });
 
   // The daily and weekly jobs, at the UTC times vercel.json gave them.
@@ -156,6 +193,6 @@ export function startScheduler(): void {
   void keepalive().catch((err) => console.error('[google] keep-alive failed:', (err as Error).message));
 
   console.log(
-    '  ▸ Scheduler started (email & task review: per-studio interval · media 2 min · reminders 9am & 5pm Pacific · Slack task reports 9am, 12pm & 5pm Pacific · follow-ups 02:00 UTC · digest 07:05 UTC · report Mon 07:00 UTC · Google keep-alive 6h)',
+    '  ▸ Scheduler started (email & task review: per-studio interval · media 2 min · reminders 9am & 5pm Pacific · Slack briefing 8am Pacific · Slack task reports 9am, 12pm & 5pm Pacific · follow-ups 02:00 UTC · digest 07:05 UTC · report Mon 07:00 UTC · Google keep-alive 6h)',
   );
 }

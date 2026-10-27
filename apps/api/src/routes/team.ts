@@ -8,6 +8,7 @@ import { env } from '../env.js';
 import { orgSourceUserId } from '../lib/tokens.js';
 import { servicesGranted } from '../lib/google.js';
 import { latestGoogleHealth } from '../lib/googleHealth.js';
+import { disabledUserIds } from '../lib/userStatus.js';
 import { gmailFor, sendMessage } from '../services/gmail.js';
 import { inviteEmail } from '../services/emailTemplate.js';
 import crypto from 'node:crypto';
@@ -131,32 +132,6 @@ async function issueCredentials(
 
 /** Long enough to mean "until someone turns it back on" — about a century. */
 const DISABLED_FOR = '876000h';
-
-function isBanned(bannedUntil: string | null | undefined): boolean {
-  const at = bannedUntil ? Date.parse(bannedUntil) : NaN;
-  return !Number.isNaN(at) && at > Date.now();
-}
-
-/** Of these people, the ones whose sign-in account is currently disabled. */
-async function disabledUserIds(ids: string[]): Promise<Set<string>> {
-  const out = new Set<string>();
-  if (!supabaseAdmin || !ids.length) return out;
-  const wanted = new Set(ids);
-  try {
-    // A studio is a handful of people; one page covers everybody, and the
-    // loop is only there so a large directory cannot silently cut it short.
-    for (let page = 1; page <= 20; page++) {
-      const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page, perPage: 1000 });
-      if (error) throw new Error(error.message);
-      for (const u of data.users) if (wanted.has(u.id) && isBanned(u.banned_until)) out.add(u.id);
-      if (data.users.length < 1000) break;
-    }
-  } catch (err) {
-    // The roster is still worth showing without the flag.
-    console.error('[team] sign-in accounts unreadable:', (err as Error).message);
-  }
-  return out;
-}
 
 /** Bounds Supabase accepts for a password; the minimum matches the reset screen. */
 const MIN_PASSWORD = 8;

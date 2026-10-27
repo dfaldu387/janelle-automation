@@ -20,8 +20,8 @@ import { IconBoard, IconSearch, IconList } from '../components/icons';
 import { Avatar, CATEGORY_HUE, HUE, HueDot, ProjectName } from '../components/hue';
 import { useAuth } from '../context/AuthContext';
 import {
-  daysEarly, useAddComment, useDeleteComment, useDeleteTask, useProjects, useTaskDetail, useTasks, useTeam, useUpdateComment, useUpdateTask,
-  type TaskComment, type TaskView, type TeamMember,
+  daysEarly, useAddComment, useCloseStaleTasks, useDeleteComment, useDeleteTask, useImportHouzzTasks, useProjects, useTaskDetail, useTaskHygiene, useTasks, useTeam, useUpdateComment, useUpdateTask,
+  type HygieneReason, type TaskComment, type TaskView, type TeamMember,
 } from '../lib/queries';
 import { DatePicker } from '../components/DatePicker';
 
@@ -1281,6 +1281,215 @@ function TaskFilterMenu({
   );
 }
 
+/**
+ * Load the "house" task list out of Houzz Pro.
+ *
+ * Houzz has no API a third party can read a studio's own tasks through, so the
+ * CSV its task screen exports is the route — the same as the project import on
+ * the Projects page. The file is read here and posted as text; it never leaves
+ * for anywhere but this studio's own API. Safe to run again: rows match on
+ * project + title, so a re-import updates the card instead of duplicating it.
+ */
+function HouzzTaskImport() {
+  const importCsv = useImportHouzzTasks();
+  const [msg, setMsg] = useState<{ text: string; tone: 'good' | 'crit' } | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+
+  const onFile = async (file: File) => {
+    setMsg(null);
+    const csv = await file.text();
+    importCsv.mutate(csv, {
+      onSuccess: (d) => {
+        if (!d.ok) return setMsg({ text: d.reason ?? 'Nothing could be read from that file.', tone: 'crit' });
+        const parts = [`${d.created} added`, `${d.updated} updated`];
+        if (d.skipped) parts.push(`${d.skipped} skipped`);
+        // Name anyone the file assigned work to that we could not match, and
+        // any column nothing was read from, so a renamed export shows up here
+        // rather than importing silent blanks or leaving work unowned unseen.
+        const extra: string[] = [];
+        if (d.unmatchedAssignees.length) extra.push(` Unassigned (no match): ${d.unmatchedAssignees.join(', ')}.`);
+        if (d.unusedColumns.length) extra.push(` Columns not read: ${d.unusedColumns.join(', ')}.`);
+        setMsg({ text: `${parts.join(', ')}.${extra.join('')}`, tone: 'good' });
+      },
+      onError: (e) => setMsg({ text: (e as Error).message, tone: 'crit' }),
+    });
+    // Let the same file be chosen again after a correction.
+    if (input.current) input.current.value = '';
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <input
+        ref={input}
+        type="file"
+        accept=".csv,text/csv"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void onFile(file);
+        }}
+      />
+      <button
+        onClick={() => input.current?.click()}
+        disabled={importCsv.isPending}
+        className="btn-secondary btn-sm"
+        title="Export your task list from Houzz Pro, then choose the file here"
+      >
+        {importCsv.isPending ? 'Reading file…' : 'Import Houzz tasks'}
+      </button>
+      {msg && (
+        <span className={`max-w-md text-right text-[12px] ${msg.tone === 'crit' ? 'text-crit' : 'text-ink-faint'}`}>
+          {msg.text}
+        </span>
+      )}
+    </div>
+  );
+}
+
+const CLEANUP_REASON: Record<HygieneReason, string> = {
+  assignee_gone: 'Assignee has left',
+  stale: 'Untouched 45+ days',
+};
+
+/**
+ * Board cleanup — the answer to "167 open?". The open count climbs because the
+ * email-driven auto-closer only ever closes a task that an email proves done;
+ * work finished in Houzz or in person, and tasks nobody has touched in months,
+ * stay open for ever. This lists those (assignee gone, or long untouched) and
+ * clears the chosen ones in one pass. Nothing is deleted — a cleared task is
+ * cancelled and can be reopened from the board — so it is safe to run.
+ */
+function BoardCleanup() {
+  const [open, setOpen] = useState(false);
+  const hygiene = useTaskHygiene();
+  const close = useCloseStaleTasks();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [result, setResult] = useState<string | null>(null);
+
+  const candidates = hygiene.data?.candidates ?? [];
+
+  // Select everything by default when the panel opens or the list changes, so
+  // the common case is one click; untick what you want to keep.
+  useEffect(() => {
+    if (open) setSelected(new Set(candidates.map((c) => c.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, hygiene.data]);
+
+  const toggle = (id: string) =>
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  const run = () => {
+    setResult(null);
+    close.mutate([...selected], {
+      onSuccess: (d) => {
+        if (!d.ok) return setResult(d.reason ?? 'Could not clear the tasks.');
+        setResult(`Cleared ${d.closed} task${d.closed === 1 ? '' : 's'} — reopen any from the board if needed.`);
+        setSelected(new Set());
+      },
+      onError: (e) => setResult((e as Error).message),
+    });
+  };
+
+  const count = candidates.length;
+
+  return (
+    <>
+      <button
+        onClick={() => {
+          setResult(null);
+          setOpen(true);
+        }}
+        className="btn-secondary btn-sm"
+        title="See why tasks are still open and clear the ones that are finished or abandoned"
+      >
+        Clean up board{count ? ` (${count})` : ''}
+      </button>
+
+      {open &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={() => setOpen(false)}>
+            <div
+              className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-surface shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="border-b border-line-soft px-5 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-[16px] font-semibold text-ink">Clean up the board</h2>
+                  <button onClick={() => setOpen(false)} className="btn-ghost btn-sm">Close</button>
+                </div>
+                <p className="mt-1 text-[12.5px] text-ink-soft">
+                  {hygiene.data ? `${hygiene.data.total} tasks open.` : 'Checking the board…'}{' '}
+                  These haven't been auto-closed because no email ever marked them done — they're finished-and-forgotten
+                  or belong to someone who's left. Clearing cancels them (not deleted); reopen any from the board.
+                </p>
+                {hygiene.data && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11.5px]">
+                    <Pill tone="warn">{hygiene.data.counts.assignee_gone} assignee has left</Pill>
+                    <Pill tone="warn">{hygiene.data.counts.stale} untouched 45+ days</Pill>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between border-b border-line-soft px-5 py-2 text-[12px] text-ink-soft">
+                <span>{selected.size} of {count} selected</span>
+                <div className="flex gap-3">
+                  <button className="text-brass hover:underline" onClick={() => setSelected(new Set(candidates.map((c) => c.id)))}>Select all</button>
+                  <button className="text-ink-faint hover:underline" onClick={() => setSelected(new Set())}>None</button>
+                </div>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                {hygiene.isLoading && <div className="px-5 py-10 text-center text-[13px] text-ink-faint">Reading the board…</div>}
+                {!hygiene.isLoading && count === 0 && (
+                  <div className="px-5 py-10 text-center text-[13px] text-ink-faint">Nothing to clear — the board is tidy.</div>
+                )}
+                <ul className="divide-y divide-line-soft">
+                  {candidates.map((c) => (
+                    <li key={c.id} className="flex items-start gap-3 px-5 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(c.id)}
+                        onChange={() => toggle(c.id)}
+                        className="mt-1 h-4 w-4 shrink-0 accent-brass"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] font-medium text-ink">{c.title}</div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-ink-faint">
+                          <span className="text-warn">{CLEANUP_REASON[c.reason]}</span>
+                          {c.assignee && <span>· {c.assignee}</span>}
+                          {c.project && <span>· {c.project}</span>}
+                          <span>· {c.ageDays}d idle</span>
+                          {c.dueDate && <span>· was due {shortDate(c.dueDate)}</span>}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 border-t border-line-soft px-5 py-3">
+                <span className={`text-[12px] ${result ? 'text-ink-soft' : 'text-ink-faint'}`}>{result ?? 'Cleared tasks are reversible.'}</span>
+                <button
+                  onClick={run}
+                  disabled={close.isPending || selected.size === 0}
+                  className="btn-primary btn-sm"
+                >
+                  {close.isPending ? 'Clearing…' : `Clear ${selected.size} selected`}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
 export default function Tasks() {
   const { data: tasks, isLoading } = useTasks();
   const { data: team } = useTeam();
@@ -1466,6 +1675,8 @@ export default function Tasks() {
         sub={view === 'board' ? 'Drag a card to Done, or press the green ✓✓ on a card, to complete it.' : undefined}
         action={
           <div className="flex flex-wrap items-center gap-2">
+            {supervisor && <BoardCleanup />}
+            {supervisor && <HouzzTaskImport />}
             <div className="relative">
               <IconSearch
                 width={15}
