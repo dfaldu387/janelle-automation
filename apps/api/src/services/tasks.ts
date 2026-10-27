@@ -359,6 +359,19 @@ function titleSimilarity(a: string, b: string): number {
   return union ? shared / union : 0;
 }
 
+/**
+ * How many meaningful words two titles have in common (see titleWords).
+ * Unlike titleSimilarity this is an absolute count, not a ratio, so two long
+ * reworded titles that share the client and the item — "countertop" + "Lemon"
+ * — register even when their Jaccard overlap sits below the fuzzy floor.
+ */
+function sharedContentWords(a: string, b: string): number {
+  const wb = titleWords(b);
+  let shared = 0;
+  for (const w of titleWords(a)) if (wb.has(w)) shared++;
+  return shared;
+}
+
 /** Below this many distinct words a title is too thin to fuzzy-match safely. */
 const MIN_FUZZY_WORDS = 6;
 /** At or above this overlap, two long-enough titles are the same work. */
@@ -382,12 +395,24 @@ function sameWork(a: string, b: string): boolean {
 }
 
 /**
- * Below this overlap two titles are plainly unrelated work and never worth a
- * second look; at or above TITLE_SIM_THRESHOLD sameWork already merges them.
- * The band between is where a reworded repeat hides — alike enough to suspect,
- * too reworded for the word bar — and only there is the model asked.
+ * The proportional band where a reworded repeat hides — alike enough to
+ * suspect, too reworded for the word bar — and the model is asked. At or above
+ * TITLE_SIM_THRESHOLD sameWork already merges them; below AMBIGUOUS_MIN the
+ * ratio is too thin ON ITS OWN. But a ratio misses the new-thread case the
+ * studio kept hitting: Janelle opens a fresh thread and rewords the ask, so two
+ * long titles share only the client and the item and their Jaccard falls under
+ * this floor though the work is plainly the same. So the model is ALSO asked
+ * whenever a same-job task shares at least SHARED_WORDS_MIN meaningful words,
+ * whatever the ratio. See the candidate build in createTaskFromEmail.
  */
 const AMBIGUOUS_MIN = 0.4;
+/**
+ * Enough shared meaningful words to send a same-job pair to the model
+ * regardless of ratio. Two — the client and the item, or a two-word item like
+ * "roller shade" — is the reworded-same-work signal; one (just the client name,
+ * shared by most tasks on a job) would drag in unrelated work.
+ */
+const SHARED_WORDS_MIN = 2;
 /** At most this many borderline titles go to the model in one question. */
 const MAX_SEMANTIC_CANDIDATES = 6;
 
@@ -1759,16 +1784,23 @@ export async function createTaskFromEmail(
   if (already) return false;
 
   // Reworded repeat the word bar is too strict to catch: same job, alike
-  // enough to suspect but under sameWork's threshold. The model settles only
-  // these — a clear duplicate was dropped just above, a clear mismatch never
-  // reaches the band — so the call fires rarely and on at most a handful of
-  // titles. A yes marks the source email checked, so the verdict is not
-  // re-bought on the next scan.
+  // enough to suspect but under sameWork's threshold. A candidate qualifies
+  // two ways — a high-enough overlap RATIO (AMBIGUOUS_MIN), or enough shared
+  // meaningful WORDS (SHARED_WORDS_MIN) whatever the ratio, which is what
+  // catches the reworded ask Janelle sends in a brand-new thread. The model
+  // settles only these — a clear duplicate was dropped just above, a clear
+  // mismatch never reaches the band — so the call fires on at most a handful of
+  // titles, the closest first. A yes marks the source email checked, so the
+  // verdict is not re-bought on the next scan.
   const borderline = (liveSame ?? [])
     .map((row) => row as { title: string; project_id: string | null })
     .filter((r) => sameProject(r.project_id))
     .map((r) => ({ title: r.title, sim: titleSimilarity(r.title, title) }))
-    .filter((c) => c.sim >= AMBIGUOUS_MIN && c.sim < TITLE_SIM_THRESHOLD)
+    .filter(
+      (c) =>
+        c.sim < TITLE_SIM_THRESHOLD &&
+        (c.sim >= AMBIGUOUS_MIN || sharedContentWords(c.title, title) >= SHARED_WORDS_MIN),
+    )
     .sort((a, b) => b.sim - a.sim)
     .slice(0, MAX_SEMANTIC_CANDIDATES);
   if (borderline.length) {

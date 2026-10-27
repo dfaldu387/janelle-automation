@@ -17,6 +17,18 @@ export function pacificHourNow(now: Date = new Date()): number {
 }
 
 /**
+ * The Pacific day of the week (0 = Sunday … 6 = Saturday) at the given instant.
+ *
+ * Weekly jobs ("Monday morning") have to key off the studio's own calendar for
+ * the same reason the daily date does: a Monday-7am-Pacific send fires at 2 or
+ * 3pm UTC, so the server's own weekday can already be a different day.
+ */
+export function pacificWeekday(now: Date = new Date()): number {
+  const name = new Intl.DateTimeFormat('en-US', { timeZone: PACIFIC_TZ, weekday: 'short' }).format(now);
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[name] ?? 0;
+}
+
+/**
  * A calendar date in the studio's time zone, as YYYY-MM-DD, `offsetDays` from today.
  *
  * "Today" cannot be read off the server's clock: Vercel runs in UTC, and the

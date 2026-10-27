@@ -283,6 +283,72 @@ ${button(url, `Reconnect Google`)}
   };
 }
 
+/**
+ * The nudge to a teammate who is set up on the system but has never connected
+ * their Google account — so none of their inbox is read, and the work a client
+ * or Janelle emails them lands on nobody's board. Distinct from reconnectEmail
+ * (that one is for a connection that WORKED and then lapsed) and from
+ * inviteEmail (that one hands over a new sign-in). The button is a pre-signed
+ * consent link, so connecting is one tap: approve with Google and they land
+ * back in Settings connected. The point, in the studio's own words from the
+ * walkthrough, is that when one person misses an email the whole team misses
+ * it — connecting is what lets anyone cover for anyone.
+ */
+export function connectInviteEmail(opts: { name: string; url: string }): Mail {
+  const hi = greeting(opts.name);
+  const url = escape(opts.url);
+
+  const body = `
+<div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
+
+<div style="margin-top:14px;font-size:14px;line-height:1.65;color:${C.inkSoft};">
+  You are set up on the Janelle Interiors workflow system, but your Google account is not
+  connected yet — so the tasks that arrive in your inbox are not being picked up, and they
+  are not showing on the shared board where the rest of us can see them.
+</div>
+
+<div style="margin-top:14px;font-size:14px;line-height:1.65;color:${C.inkSoft};">
+  Connecting matters because when one person misses an email, the whole team misses it.
+  Once your Gmail is connected, anything a client or Janelle sends you turns into a task
+  automatically, so nothing slips through if you are heads-down or away — someone can pick
+  it up. It takes one tap: the button below sends you straight to Google to approve it.
+</div>
+
+${button(url, 'Connect your Google account')}
+
+<div style="font-size:12.5px;line-height:1.6;color:${C.inkFaint};">
+  Or paste this into your browser: <span style="color:${C.brassDeep};">${url}</span>
+</div>
+
+<div style="margin-top:24px;padding-top:18px;border-top:1px solid ${C.line};font-size:12.5px;line-height:1.6;color:${C.inkFaint};">
+  If you have any questions about this before connecting, just reply and ask.
+</div>`;
+
+  const text = [
+    hi,
+    '',
+    'You are set up on the Janelle Interiors workflow system, but your Google account is',
+    'not connected yet — so the tasks that arrive in your inbox are not being picked up,',
+    'and they are not showing on the shared board where the rest of us can see them.',
+    '',
+    'Connecting matters because when one person misses an email, the whole team misses it.',
+    'Once your Gmail is connected, anything a client or Janelle sends you turns into a task',
+    'automatically, so nothing slips through if you are heads-down or away — someone can',
+    'pick it up. It takes one tap:',
+    `  ${opts.url}`,
+    '',
+    'If you have any questions about this before connecting, just reply and ask.',
+    '',
+    ...FOOTER_TEXT,
+  ].join('\n');
+
+  return {
+    subject: 'Connect your Google account — Janelle Interiors',
+    text,
+    html: shell('Connect your Google account so your inbox tasks reach the team.', body),
+  };
+}
+
 // ── The task reminders: morning priorities and an end-of-day check-in ──
 
 /**
@@ -687,5 +753,110 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the task board') : ''}`;
     subject: `${evening ? 'Team end-of-day check-in' : 'Team priorities today'} — ${line}`,
     text,
     html: shell(line, body),
+  };
+}
+
+interface ActivityPersonRow {
+  name: string;
+  connected: boolean;
+  emailsSent: number | null;
+  emailsCapped: boolean;
+  tasksCompleted: number;
+  tasksOpen: number;
+  tasksOverdue: number;
+  lastSentAt: string | null;
+}
+
+/**
+ * The weekly per-person activity digest, to the owner only.
+ *
+ * A reconciliation sheet, not a scorecard: emails sent and how task load moved,
+ * per person, so a reported week of hours has something concrete beside it. The
+ * caveat at the foot is part of the message, not fine print — the numbers are
+ * activity signals, never a measure of hours, and Drive is a blind spot.
+ */
+export function teamActivityEmail(opts: {
+  name: string;
+  report: { days: number; people: ActivityPersonRow[]; notes: string[] };
+  boardUrl?: string;
+}): Mail {
+  const hi = greeting(opts.name);
+  const { days, people, notes } = opts.report;
+  const window = days === 7 ? 'the past week' : `the past ${days} days`;
+  const lead = `Here is what each teammate's ${window} looked like by the two signals the system can see — mail they sent, and how their task load moved. Read it against their reported hours, not as hours itself.`;
+
+  const shortSent = (iso: string | null): string => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  };
+  const emailCell = (p: ActivityPersonRow): string => {
+    if (!p.connected) return `<span style="color:${C.inkFaint};">not connected</span>`;
+    if (p.emailsSent === null) return `<span style="color:${C.inkFaint};">—</span>`;
+    return `${p.emailsSent}${p.emailsCapped ? '+' : ''}`;
+  };
+
+  const th = (label: string, align = 'left') =>
+    `<td align="${align}" style="padding:8px 10px;border-bottom:2px solid ${C.line};font-family:${FONT};font-size:11px;font-weight:700;color:${C.inkFaint};text-transform:uppercase;letter-spacing:0.4px;white-space:nowrap;">${label}</td>`;
+  const td = (value: string, align = 'left', color = C.ink, weight = '400') =>
+    `<td align="${align}" style="padding:9px 10px;border-bottom:1px solid ${C.line};font-family:${FONT};font-size:13px;color:${color};font-weight:${weight};white-space:nowrap;">${value}</td>`;
+
+  const rows = people
+    .map(
+      (p) => `<tr>
+  ${td(escape(p.name), 'left', C.ink, '600')}
+  ${td(emailCell(p), 'right')}
+  ${td(String(p.tasksCompleted), 'right', p.tasksCompleted ? C.good : C.inkFaint)}
+  ${td(String(p.tasksOpen), 'right')}
+  ${td(p.tasksOverdue ? String(p.tasksOverdue) : '0', 'right', p.tasksOverdue ? C.crit : C.inkFaint, p.tasksOverdue ? '600' : '400')}
+  ${td(shortSent(p.lastSentAt), 'right', C.inkSoft)}
+</tr>`,
+    )
+    .join('');
+
+  const table = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:18px;border:1px solid ${C.line};border-radius:10px;border-collapse:separate;">
+  <tr style="background:${C.sunk};">
+    ${th('Person')}${th('Emails', 'right')}${th('Done', 'right')}${th('Open', 'right')}${th('Overdue', 'right')}${th('Last sent', 'right')}
+  </tr>
+  ${rows}
+</table>`;
+
+  const noteList = notes.map((n) => `<li style="margin:4px 0;">${escape(n)}</li>`).join('');
+  const caveat = `<div style="margin-top:18px;padding:12px 14px;background:${C.sunk};border-radius:10px;">
+  <ul style="margin:0;padding-left:18px;font-family:${FONT};font-size:12px;line-height:1.5;color:${C.inkSoft};">${noteList}</ul>
+</div>`;
+
+  const body = `
+<div style="font-size:15px;line-height:1.55;color:${C.ink};">${escape(hi)}</div>
+<div style="margin-top:10px;font-size:14px;line-height:1.6;color:${C.inkSoft};">${escape(lead)}</div>
+${table}
+${caveat}
+${opts.boardUrl ? button(opts.boardUrl, 'Open the team page') : ''}`;
+
+  const textRows = people
+    .map((p) => {
+      const emails = !p.connected ? 'not connected' : p.emailsSent === null ? '—' : `${p.emailsSent}${p.emailsCapped ? '+' : ''}`;
+      return `  ${p.name} — ${emails} emails · ${p.tasksCompleted} done · ${p.tasksOpen} open · ${p.tasksOverdue} overdue · last sent ${shortSent(p.lastSentAt)}`;
+    })
+    .join('\n');
+  const text = [
+    hi,
+    '',
+    lead,
+    '',
+    textRows,
+    '',
+    ...notes.map((n) => `- ${n}`),
+    opts.boardUrl ? `\nOpen the team page: ${opts.boardUrl}` : '',
+    '',
+    ...FOOTER_TEXT,
+  ]
+    .filter((l) => l !== '')
+    .join('\n');
+
+  return {
+    subject: `Team activity — ${window}`,
+    text,
+    html: shell(`Team activity for ${window}`, body),
   };
 }

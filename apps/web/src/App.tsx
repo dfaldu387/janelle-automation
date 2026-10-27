@@ -15,6 +15,7 @@ import Tasks from './pages/Tasks';
 import Assistant from './pages/Assistant';
 import Drafts from './pages/Drafts';
 import Reports from './pages/Reports';
+import DailyReport from './pages/DailyReport';
 import Activity from './pages/Activity';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
@@ -254,6 +255,7 @@ export default function App() {
                 <Route path="/tasks" element={<Viewable needs="tasks"><Tasks /></Viewable>} />
                 <Route path="/follow-ups" element={<Viewable needs="follow_ups"><FollowUps /></Viewable>} />
                 <Route path="/drafts" element={<Viewable needs="drafts"><Drafts /></Viewable>} />
+                <Route path="/daily" element={<Viewable supervisorOnly><DailyReport /></Viewable>} />
                 <Route path="/reports" element={<Viewable needs="reports"><Reports /></Viewable>} />
                 <Route path="/activity" element={<Viewable supervisorOnly><Activity /></Viewable>} />
                 {/* Moved under Settings; the old addresses still land there. */}
