@@ -134,6 +134,9 @@ function AddPerson({ onDone }: { onDone: () => void }) {
   );
 }
 
+/** Google still accepts the connection. A saved one it has refused reads no mail. */
+const googleWorks = (m: TeamMember) => Boolean(m.google?.connected && !m.google.needs_reconnect);
+
 /** Whose Google is connected — until it is, none of that person's mail is read. */
 function GoogleStatus({ g }: { g: TeamMember['google'] }) {
   if (!g?.connected) {
@@ -972,7 +975,7 @@ export default function Team() {
   const activePrincipals = team.filter((m) => m.role === 'principal' && !m.disabled).length;
   const manages = Boolean(can?.create || can?.update || can?.delete || can?.impersonate);
   const columns = manages ? 6 : 5;
-  const googleConnected = team.filter((m) => m.google?.connected).length;
+  const googleConnected = team.filter(googleWorks).length;
 
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
@@ -983,8 +986,8 @@ export default function Team() {
         if (roleFilter !== 'all' && m.role !== roleFilter) return false;
         if (statusFilter === 'active' && m.disabled) return false;
         if (statusFilter === 'disabled' && !m.disabled) return false;
-        if (statusFilter === 'connected' && !m.google?.connected) return false;
-        if (statusFilter === 'not_connected' && m.google?.connected) return false;
+        if (statusFilter === 'connected' && !googleWorks(m)) return false;
+        if (statusFilter === 'not_connected' && googleWorks(m)) return false;
         return matches(query, m.full_name, m.email);
       }),
     [team, query, roleFilter, statusFilter],
@@ -996,7 +999,7 @@ export default function Team() {
       name: (m) => m.full_name || m.email,
       role: (m) => ROLE_LABELS[m.role] ?? m.role,
       seat: (m) => (m.seat ? SEATS[m.seat]?.label : ''),
-      google: (m) => (m.google?.connected ? 1 : 0),
+      google: (m) => (googleWorks(m) ? 1 : 0),
       tasks: (m) => m.live_tasks ?? 0,
     },
   });
