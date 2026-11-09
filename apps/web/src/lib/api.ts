@@ -46,6 +46,17 @@ export class SessionExpiredError extends Error {
   }
 }
 
+/**
+ * Signed in, and the emailed code has not been entered yet.
+ * The app shows the code screen instead of the studio until it is.
+ */
+export class LoginCodeRequiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LoginCodeRequiredError';
+  }
+}
+
 /** Why the app signed someone out, for the sign-in screen to show once. */
 export const SIGNED_OUT_REASON = 'janelle.signedOutReason';
 
@@ -103,6 +114,9 @@ export async function api<T>(path: string, init: RequestInit = {}, retried = fal
   }
 
   const body = await res.json().catch(() => ({}));
+  if (res.status === 403 && (body as { code?: string }).code === 'login_code_required') {
+    throw new LoginCodeRequiredError((body as { error?: string }).error ?? 'Enter your sign-in code.');
+  }
   if (!res.ok) {
     throw new Error((body as { error?: string }).error ?? `Request failed (${res.status})`);
   }

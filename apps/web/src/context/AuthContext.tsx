@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
-import { api, SessionExpiredError } from '../lib/api';
+import { api, LoginCodeRequiredError, SessionExpiredError } from '../lib/api';
 import { clearImpersonation } from '../lib/impersonate';
 import { recordSignIn } from '../lib/loginEvents';
 import { loadClarity, identifyClarity } from '../lib/clarity';
@@ -77,6 +77,8 @@ interface AuthCtx {
   recovery: boolean;
   /** Done resetting — release the app. */
   endRecovery: () => void;
+  /** Just signed in; the emailed code must be entered before the app opens. */
+  loginCodeNeeded: boolean;
 }
 
 const Ctx = createContext<AuthCtx | null>(null);
@@ -93,6 +95,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [googleNeedsReconnect, setGoogleNeedsReconnect] = useState(false);
   /** The studio's Gmail address, for account-targeted "Open in Gmail" links. */
   const [gmailAccount, setGmailAccount] = useState<string | null>(null);
+  const [loginCodeNeeded, setLoginCodeNeeded] = useState(false);
   // Read from the URL before anything else: supabase-js consumes the hash
   // as it starts up, and by the time a listener is attached the evidence
   // that this was a recovery link can already be gone.
@@ -115,6 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         gmailAccount?: string | null;
         google?: { status?: string; needs_reconnect?: string | null };
       }>('/me');
+      setLoginCodeNeeded(false);
       setGmailAccount(me.gmailAccount ?? null);
 
       // Session replay for the team, when an admin has turned it on. Loaded
@@ -155,6 +159,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Not an unreachable API: the session was dead and has been dropped,
       // so the login screen is already on its way.
       if (err instanceof SessionExpiredError) return;
+      // Just signed in: the code screen takes over until it is entered.
+      if (err instanceof LoginCodeRequiredError) {
+        setLoginCodeNeeded(true);
+        return;
+      }
       setProfileError((err as Error).message || 'Could not reach the server.');
     }
   }, []);
@@ -196,6 +205,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setGoogleConnected(null);
         setGoogleNeedsReconnect(false);
         setGmailAccount(null);
+        setLoginCodeNeeded(false);
       }
     });
 
@@ -218,6 +228,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setGoogleConnected(null);
     setGoogleNeedsReconnect(false);
     setGmailAccount(null);
+    setLoginCodeNeeded(false);
   };
 
   // Unknown means allowed: a slow /me must never look like a revoked module.
@@ -241,6 +252,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         configured: supabaseConfigured, loading, session, profile, user, profileError, may,
         refresh: loadProfile, signOut, googleConnected, googleNeedsReconnect, gmailAccount,
         recovery, endRecovery: () => setRecovery(false),
+        loginCodeNeeded,
       }}
     >
       {children}

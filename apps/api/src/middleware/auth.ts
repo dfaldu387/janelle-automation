@@ -4,6 +4,8 @@ import { supabaseAdmin, supabaseForToken } from '../lib/supabase.js';
 import { canWith, type Action, type PermissionOverrides, type Resource, type Seat, type UserRole } from '@janelle/shared';
 import { loadOverrides } from '../lib/permissions.js';
 import { profileColumns } from '../lib/columns.js';
+import { LOGIN_CODE_REQUIRED, codeRequiredFor, isVerified, signInSession } from '../lib/loginCode.js';
+import type { SignInMethod } from '../lib/signInMethod.js';
 
 /** Data attached to an authenticated request. */
 export interface AuthContext {
@@ -22,6 +24,10 @@ export interface AuthContext {
   db: SupabaseClient;
   /** The studio's edits to the default permission matrix, if any. */
   permissions: PermissionOverrides;
+  /** Supabase's id for this sign-in. Absent where a context is built without a token. */
+  sessionId?: string | null;
+  /** How this session began: Google, password, a reset link and so on. */
+  signInMethod?: SignInMethod | null;
 }
 
 declare global {
@@ -67,6 +73,23 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return res.status(401).json({ error: 'This account has been disabled' });
   }
 
+  // Signing in is followed by an emailed code (lib/loginCode.ts).
+  // Until it is entered, only the routes that send and check it answer.
+  // Refused, not let through, when the check itself cannot be made.
+  const signIn = signInSession(token, data.user);
+  if (codeRequiredFor(signIn.method) && !req.originalUrl.startsWith('/api/login-code')) {
+    let ok = false;
+    try {
+      ok = Boolean(signIn.sessionId) && (await isVerified(signIn.sessionId!));
+    } catch (err) {
+      console.error('[login-code] check failed:', (err as Error).message);
+      return res.status(503).json({ error: 'Could not check your sign-in code. Try again in a moment.' });
+    }
+    if (!ok) {
+      return res.status(403).json({ error: 'Enter the code we emailed you to finish signing in.', code: LOGIN_CODE_REQUIRED });
+    }
+  }
+
   // Profile carries org + role. Read via admin to avoid a policy
   // chicken-and-egg on first login.
   // `seat` only when migration 0008 has been applied — see lib/seats.ts.
@@ -89,6 +112,8 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     // Non-null here: we returned 503 above when Supabase is unconfigured.
     db: supabaseForToken(token) as SupabaseClient,
     permissions: await loadOverrides(orgId),
+    sessionId: signIn.sessionId,
+    signInMethod: signIn.method,
   };
 
   next();

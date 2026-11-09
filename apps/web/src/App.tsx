@@ -20,6 +20,7 @@ import Activity from './pages/Activity';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
+import LoginCode from './pages/LoginCode';
 import ConfigNeeded from './pages/ConfigNeeded';
 import UsageReport from './pages/UsageReport';
 import { Inbox, Documents } from './pages/Simple';
@@ -201,7 +202,7 @@ function useLandOnFollowUps() {
 }
 
 export default function App() {
-  const { configured, loading, session, user, profileError, refresh, signOut, recovery } = useAuth();
+  const { configured, loading, session, user, profileError, refresh, signOut, recovery, loginCodeNeeded } = useAuth();
   const { pathname } = useLocation();
   useLandOnFollowUps();
 
@@ -223,6 +224,8 @@ export default function App() {
   // would open as normal — before they have done the one thing they came
   // for. Held here until the new password is saved.
   if (recovery) return <ResetPassword />;
+  // Just signed in: held here until the emailed code is entered.
+  if (loginCodeNeeded) return <LoginCode />;
   // Signed in but no profile: either provisioning, or the API is unreachable.
   if (!user) {
     if (profileError) return <BackendError message={profileError} onRetry={refresh} onSignOut={signOut} />;

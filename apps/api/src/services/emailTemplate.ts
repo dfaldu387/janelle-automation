@@ -860,3 +860,43 @@ ${opts.boardUrl ? button(opts.boardUrl, 'Open the team page') : ''}`;
     html: shell(`Team activity for ${window}`, body),
   };
 }
+
+/**
+ * The code asked for after signing in. Short on purpose: it is
+ * read on a phone, mid sign-in, and the code is the only thing that matters.
+ */
+export function loginCodeEmail(opts: { code: string; minutes: number }): Mail {
+  const code = escape(opts.code);
+  const body = `
+<div style="font-size:15px;line-height:1.55;color:${C.ink};">Your sign-in code for the Janelle Interiors workflow system:</div>
+
+<div style="margin:22px 0;font-size:32px;font-weight:700;letter-spacing:8px;color:${C.ink};">${code}</div>
+
+<div style="font-size:14px;line-height:1.65;color:${C.inkSoft};">
+  Enter it on the sign-in screen. It works once and expires in ${opts.minutes} minutes.
+</div>
+
+<div style="margin-top:24px;padding-top:18px;border-top:1px solid ${C.line};font-size:12.5px;line-height:1.6;color:${C.inkFaint};">
+  If you did not just sign in, someone may be trying to. Do not share this code, and
+  tell the studio admin.
+</div>`;
+
+  const text = [
+    'Your sign-in code for the Janelle Interiors workflow system:',
+    '',
+    `  ${opts.code}`,
+    '',
+    `Enter it on the sign-in screen. It works once and expires in ${opts.minutes} minutes.`,
+    '',
+    'If you did not just sign in, someone may be trying to. Do not share this code, and',
+    'tell the studio admin.',
+    '',
+    ...FOOTER_TEXT,
+  ].join('\n');
+
+  return {
+    subject: `${opts.code} is your Janelle Interiors sign-in code`,
+    text,
+    html: shell(`Your sign-in code is ${opts.code}.`, body),
+  };
+}
