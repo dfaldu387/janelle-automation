@@ -26,6 +26,7 @@ import { permissionsRouter } from './routes/permissions.js';
 import { settingsRouter } from './routes/settings.js';
 import { auditRouter } from './routes/audit.js';
 import { loginHistoryRouter } from './routes/loginHistory.js';
+import { loginCodeRouter } from './routes/loginCode.js';
 import { errorHandler, notFound } from './middleware/error.js';
 
 /**
@@ -95,6 +96,8 @@ app.use('/api/audit', auditRouter);
 // Reading it needs a supervisor's session; reporting an attempt cannot have
 // one — the router draws that line itself, per route.
 app.use('/api/login-history', loginHistoryRouter);
+// The code after Continue with Google. Reachable before that code is entered.
+app.use('/api/login-code', loginCodeRouter);
 
 // No session required — the token in the URL is the credential.
 app.use('/api/public', publicUsageRouter);

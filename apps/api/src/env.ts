@@ -95,6 +95,24 @@ export const env = {
   },
 
   tokenEncryptionKey: optional('TOKEN_ENCRYPTION_KEY'),
+
+  /**
+   * The address automatic emails are sent from, e.g. systems@janelleinteriors.com.
+   * Gmail only allows it once the studio mailbox has it under "Send mail as";
+   * until then emails go out from the mailbox's own address.
+   */
+  mail: {
+    fromAddress: optional('MAIL_FROM_ADDRESS').trim().toLowerCase(),
+  },
+
+  /**
+   * Email a code after signing in and keep the app closed until it is entered.
+   * Each way of signing in is switched on separately. Needs migration 0039 first.
+   */
+  loginCode: {
+    google: optional('LOGIN_CODE_GOOGLE') === 'true',
+    password: optional('LOGIN_CODE_PASSWORD') === 'true',
+  },
 } as const;
 
 export const isGoogleConfigured = () =>

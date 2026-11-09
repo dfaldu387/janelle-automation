@@ -1,7 +1,11 @@
 import crypto from 'node:crypto';
 import { gmail as gmailApi, type gmail_v1 } from '@googleapis/gmail';
-import { googleClientForUser, orgSourceUserId } from '../lib/tokens.js';
+import { googleClientForUser, isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
+import { SENDER_PROVIDER, oauthClient } from '../lib/google.js';
+import { decrypt, encrypt } from '../lib/crypto.js';
+import { supabaseAdmin } from '../lib/supabase.js';
 import { STUDIO_DOMAINS, isStudioAddress } from '../lib/studioTeam.js';
+import { env } from '../env.js';
 
 export interface PdfAttachment {
   filename: string;
@@ -671,6 +675,8 @@ export interface DraftContent {
   html?: string;
   /** Set together, to make this a proper reply sitting in the original thread. */
   threadId?: string; inReplyTo?: string;
+  /** The From line. Left out, Gmail uses the account's own name and address. */
+  from?: { name: string; address: string };
 }
 
 /** A draft (or sent message), as Gmail's own ids for it — never its text. */
@@ -686,6 +692,7 @@ export interface DraftHandle {
  */
 function buildRawMime(opts: DraftContent): string {
   const headers = [`To: ${opts.to}`];
+  if (opts.from) headers.unshift(`From: ${fromName(opts.from.name)} <${opts.from.address}>`);
   if (opts.cc) headers.push(`Cc: ${opts.cc}`);
   // Bcc is a header Gmail strips on the way out; recipients never see it.
   if (opts.bcc) headers.push(`Bcc: ${opts.bcc}`);
@@ -808,7 +815,27 @@ export async function deleteDraft(gmail: gmail_v1.Gmail, draftId: string): Promi
  * this needs no new consent from the studio.
  */
 export async function sendMessage(gmail: gmail_v1.Gmail, opts: DraftContent): Promise<string> {
-  const raw = buildRawMime(opts);
+  // The sending mailbox (MAIL_FROM_ADDRESS, e.g. systems@) when it has been
+  // connected: the email then really comes from that account. If Google has
+  // refused it, the studio mailbox below sends instead, so codes and
+  // reminders still arrive.
+  const sender = opts.from ? null : await sendingMailbox();
+  if (sender) {
+    try {
+      const raw = buildRawMime({ ...opts, from: { name: SENDER_NAME, address: sender.address } });
+      const res = await sender.gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+      return res.data.id ?? '';
+    } catch (err) {
+      if (!isGoogleAuthFailure(err)) throw err;
+      console.error(`[gmail] ${sender.address} refused by Google, sending from the studio mailbox:`, (err as Error).message);
+    }
+  }
+
+  // Every automatic email reads "Janelle Interiors" in the inbox, whichever
+  // studio mailbox sends it (the studio asked for this, Nov 2026). The
+  // address stays the mailbox's own, since Gmail only sends as that.
+  const address = opts.from ? null : await senderAddress(gmail);
+  const raw = buildRawMime(address ? { ...opts, from: { name: SENDER_NAME, address } } : opts);
   const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
   return res.data.id ?? '';
 }
@@ -819,6 +846,88 @@ function wrap(b64: string): string {
 }
 
 /** A subject with anything outside ASCII has to say so, or it arrives as mojibake. */
+/**
+ * The connected sending mailbox for MAIL_FROM_ADDRESS, or null when there is
+ * none. Read from the database on each send: one small query, and a new or
+ * removed connection takes effect at once.
+ */
+async function sendingMailbox(): Promise<{ gmail: gmail_v1.Gmail; address: string } | null> {
+  const address = env.mail.fromAddress;
+  if (!address || !supabaseAdmin) return null;
+  const { data } = await supabaseAdmin
+    .from('integrations')
+    .select('id, encrypted_tokens')
+    .eq('provider', SENDER_PROVIDER)
+    .eq('status', 'connected')
+    .eq('account_email', address)
+    .order('connected_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data?.encrypted_tokens) return null;
+  let tokens: Record<string, unknown>;
+  try {
+    tokens = JSON.parse(decrypt(data.encrypted_tokens));
+  } catch {
+    return null;
+  }
+  const auth = oauthClient();
+  auth.setCredentials(tokens);
+  auth.on('tokens', async (fresh) => {
+    await supabaseAdmin!
+      .from('integrations')
+      .update({ encrypted_tokens: encrypt(JSON.stringify({ ...tokens, ...fresh })) })
+      .eq('id', data.id);
+  });
+  return { gmail: gmailApi({ version: 'v1', auth }), address };
+}
+
+/** The name on every automatic email the system sends. */
+export const SENDER_NAME = 'Janelle Interiors';
+
+// The mailbox each Gmail client sends as, asked of Gmail once per client.
+const senderAddresses = new WeakMap<gmail_v1.Gmail, Promise<string | null>>();
+
+/**
+ * The address to send from: MAIL_FROM_ADDRESS when this mailbox may send as
+ * it, otherwise the mailbox's own. Null when Gmail cannot say, and the email
+ * then goes out as before, under the account's own name and address.
+ *
+ * Checked rather than assumed: Gmail quietly rewrites a From address the
+ * mailbox has not been allowed to use, so asking first is the only way to
+ * know which address the email will really carry.
+ */
+function senderAddress(gmail: gmail_v1.Gmail): Promise<string | null> {
+  let found = senderAddresses.get(gmail);
+  if (!found) {
+    found = pickSender(gmail).catch((err) => {
+      console.error('[gmail] could not read the sending address:', (err as Error).message);
+      senderAddresses.delete(gmail);
+      return null;
+    });
+    senderAddresses.set(gmail, found);
+  }
+  return found;
+}
+
+async function pickSender(gmail: gmail_v1.Gmail): Promise<string | null> {
+  const own = (await gmail.users.getProfile({ userId: 'me' })).data.emailAddress ?? null;
+  const wanted = env.mail.fromAddress;
+  if (!wanted || wanted === own?.toLowerCase()) return own;
+  const { data } = await gmail.users.settings.sendAs.list({ userId: 'me' });
+  const allowed = (data.sendAs ?? []).some(
+    (a) => a.sendAsEmail?.toLowerCase() === wanted && (a.isPrimary || a.verificationStatus === 'accepted'),
+  );
+  if (allowed) return wanted;
+  console.warn(`[gmail] ${own} cannot send as ${wanted} yet (add it under Send mail as); sending as ${own}`);
+  return own;
+}
+
+/** A display name for a From line: quoted when plain, encoded when not. */
+function fromName(name: string): string {
+  const encoded = encodeHeader(name);
+  return encoded === name ? `"${name.replace(/["\\]/g, '')}"` : encoded;
+}
+
 function encodeHeader(value: string): string {
   // eslint-disable-next-line no-control-regex
   if (!/[^\x00-\x7F]/.test(value)) return value;

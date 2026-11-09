@@ -102,6 +102,28 @@ export function verifyState(state: string): { userId: string; service: string; n
 }
 
 /**
+ * The mailbox system emails are SENT from (MAIL_FROM_ADDRESS, e.g. systems@),
+ * connected separately from the mailbox the studio's mail is READ from.
+ *
+ * Send only: `gmail.send` cannot read, search or delete anything. `openid`
+ * and `email` are there so the callback can see which Google account
+ * approved, and refuse any other.
+ */
+export const SENDER_SERVICE = 'sender';
+export const SENDER_PROVIDER = 'google_sender';
+const SENDER_SCOPES = ['openid', 'email', 'https://www.googleapis.com/auth/gmail.send'];
+
+export function senderConsentUrl(state: string, loginHint?: string): string {
+  return oauthClient().generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: SENDER_SCOPES,
+    state,
+    login_hint: loginHint || undefined,
+  });
+}
+
+/**
  * A ready-to-click Google consent link for one user — for emailing someone
  * whose grant has lapsed. The callback trusts the signed state, so the link
  * needs no app session: they click, approve with Google, and land back in

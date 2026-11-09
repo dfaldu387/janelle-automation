@@ -3,8 +3,11 @@ import { env, isGoogleConfigured } from '../env.js';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import {
+  SENDER_PROVIDER,
+  SENDER_SERVICE,
   consentUrl,
   oauthClient,
+  senderConsentUrl,
   servicesGranted,
   scopesFor,
   signState,
@@ -47,6 +50,22 @@ authRouter.get(
   }),
 );
 
+// The consent link for the SENDING mailbox (MAIL_FROM_ADDRESS). Principals
+// only: it decides which address every system email comes from.
+authRouter.get(
+  '/google/sender-url',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    if (!isGoogleConfigured()) {
+      return res.status(503).json({ error: 'Google integration is not configured on the server' });
+    }
+    if (req.auth!.role !== 'principal') return res.status(403).json({ error: 'Only a principal can set the sending address' });
+    if (!env.mail.fromAddress) return res.status(400).json({ error: 'MAIL_FROM_ADDRESS is not set on the server' });
+    const url = senderConsentUrl(signState(req.auth!.userId, SENDER_SERVICE, 'settings'), env.mail.fromAddress);
+    res.json({ data: { url, address: env.mail.fromAddress } });
+  }),
+);
+
 // Step 2 — Google redirects here with an authorization code.
 authRouter.get(
   '/google/callback',
@@ -60,6 +79,52 @@ authRouter.get(
       return res.redirect(`${webApp}/settings?google=error&service=${service}`);
     }
     const { userId } = state;
+
+    // The sending mailbox is stored on its own, and never touches the
+    // studio's reading connection handled below.
+    if (state.service === SENDER_SERVICE) {
+      const client = oauthClient();
+      const { tokens } = await client.getToken(code);
+      let email = '';
+      try {
+        const ticket = await client.verifyIdToken({ idToken: String(tokens.id_token ?? ''), audience: env.google.clientId });
+        email = (ticket.getPayload()?.email ?? '').toLowerCase();
+      } catch {
+        /* no identity: refused below */
+      }
+      if (!email || email !== env.mail.fromAddress) {
+        console.warn(`[auth] sending mailbox refused: approved as ${email || 'unknown'}, expected ${env.mail.fromAddress}`);
+        return res.redirect(`${webApp}/settings?sender=wrong_account`);
+      }
+      const { data: owner } = await supabaseAdmin.from('profiles').select('org_id').eq('id', userId).maybeSingle();
+      if (!owner?.org_id) return res.redirect(`${webApp}/settings?sender=error`);
+      const { error: saveError } = await supabaseAdmin.from('integrations').upsert(
+        {
+          org_id: owner.org_id,
+          user_id: userId,
+          provider: SENDER_PROVIDER,
+          encrypted_tokens: encrypt(JSON.stringify(tokens)),
+          scopes: String(tokens.scope ?? ''),
+          status: 'connected',
+          connected_at: new Date().toISOString(),
+          account_email: email,
+        },
+        { onConflict: 'user_id,provider' },
+      );
+      if (saveError) {
+        console.error('[auth] saving the sending mailbox failed:', saveError.message);
+        return res.redirect(`${webApp}/settings?sender=error`);
+      }
+      await supabaseAdmin.from('activity_log').insert({
+        org_id: owner.org_id,
+        actor: userId,
+        action: 'google.sender_connect',
+        entity: 'integrations',
+        entity_id: userId,
+        meta: { email },
+      });
+      return res.redirect(`${webApp}/settings?sender=connected`);
+    }
 
     const client = oauthClient();
     const { tokens } = await client.getToken(code);
