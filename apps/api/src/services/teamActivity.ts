@@ -1,6 +1,5 @@
 import { hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { orgSourceUserId } from '../lib/tokens.js';
 import { deliveryAddressFor, isStudioMailbox } from '../lib/studioTeam.js';
 import { pacificDate } from '../lib/pacificTime.js';
 import { gmailFor, sendMessage, sentActivity } from './gmail.js';
@@ -205,10 +204,6 @@ export async function runTeamActivityDigest(orgId: string, days = 7): Promise<Te
   );
   if (!owners.length) return { ok: true, reason: 'no_owner', ownersSent: 0, people: report.people.length };
 
-  const sender = await orgSourceUserId(orgId);
-  const gmail = sender ? await gmailFor(sender) : null;
-  if (!gmail) return { ok: false, reason: 'no_source_mailbox', ownersSent: 0, people: report.people.length };
-
   const appUrl = (env.appUrl ?? '').replace(/\/+$/, '');
   const boardUrl = appUrl ? `${appUrl}/team` : undefined;
 
@@ -216,7 +211,7 @@ export async function runTeamActivityDigest(orgId: string, days = 7): Promise<Te
   for (const owner of owners) {
     const mail = teamActivityEmail({ name: owner.full_name as string, report, boardUrl });
     try {
-      await sendMessage(gmail, {
+      await sendMessage({
         to: deliveryAddressFor(owner.email as string),
         subject: mail.subject,
         body: mail.text,

@@ -1,6 +1,7 @@
 import { env } from '../env.js';
 import { resolveSlack } from '../lib/slackSettings.js';
 import { SlackError, lookupUserByEmail, openDm, postMessage, type SlackMessage } from './slack.js';
+import { logV1Skipped, remindersV1Enabled } from '../lib/remindersV1.js';
 import type { MiddayCounts, MiddayPlan, MiddaySection, MiddayTaskRow, ReminderSlot } from './emailTemplate.js';
 
 /**
@@ -41,7 +42,7 @@ export interface SlackReminderInput {
 
 export interface SlackReminderResult {
   sent: number;
-  skipped?: 'not_connected' | 'paused' | 'off';
+  skipped?: 'not_connected' | 'paused' | 'off' | 'v1_reminders_disabled';
   /** People with no Slack account at their email, who got the email only. */
   notOnSlack: string[];
   errors: string[];
@@ -194,6 +195,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export async function sendSlackReminders(orgId: string, input: SlackReminderInput): Promise<SlackReminderResult> {
   const result: SlackReminderResult = { sent: 0, notOnSlack: [], errors: [] };
+  if (!(await remindersV1Enabled(orgId))) {
+    logV1Skipped('slackReminder');
+    return { ...result, skipped: 'v1_reminders_disabled' };
+  }
   const slack = await resolveSlack(orgId);
   if (!slack.token) return { ...result, skipped: 'not_connected' };
   if (!slack.config.enabled) return { ...result, skipped: 'paused' };

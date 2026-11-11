@@ -5,11 +5,10 @@ import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { hasSeatColumn, profileColumns } from '../lib/columns.js';
 import { env } from '../env.js';
-import { orgSourceUserId } from '../lib/tokens.js';
 import { servicesGranted } from '../lib/google.js';
 import { latestGoogleHealth } from '../lib/googleHealth.js';
 import { disabledUserIds } from '../lib/userStatus.js';
-import { gmailFor, sendMessage } from '../services/gmail.js';
+import { sendMessage } from '../services/gmail.js';
 import { inviteEmail } from '../services/emailTemplate.js';
 import crypto from 'node:crypto';
 
@@ -107,13 +106,10 @@ async function issueCredentials(
   let mailError: string | null = null;
   if (opts.send === false) return { emailed, mailError, password };
   try {
-    const sender = await orgSourceUserId(orgId);
-    const gmail = sender ? await gmailFor(sender) : null;
-    if (!gmail) throw new Error('No Google account is connected to send from');
     // Resolved before anything is sent: a bad address should stop the mail,
     // not produce one nobody can use.
     const mail = inviteEmail({ name: fullName, email, password, url: publicAppUrl() });
-    await sendMessage(gmail, {
+    await sendMessage({
       to: email,
       cc: env.invite.cc,
       bcc: env.invite.bcc,

@@ -5,6 +5,7 @@ import { env } from '../env.js';
 import { SlackError, postMessage, type SlackMessage } from './slack.js';
 import { resolveFollowUps } from './followups.js';
 import { JOIN_SCOPE_HINT, ROUTE_FALLBACK_CODES, channelFor, joinIfNeeded, loadDirectory, type ProjectRef } from './slackRouting.js';
+import { logV1Skipped, remindersV1Enabled } from '../lib/remindersV1.js';
 
 /**
  * The daily reminder, posted to the Slack channel.
@@ -182,7 +183,11 @@ export async function runSlackDigest(orgId: string): Promise<SlackDigestResult> 
   const [{ data: taskRows, error: te }, { data: fuRows, error: fe }] = await Promise.all([tq, fq]);
   if (te || fe) throw new Error((te ?? fe)!.message);
 
-  const tasks = ((taskRows ?? []) as unknown as {
+  // v2: with v1 reminders off, the briefing keeps its follow-ups and drops
+  // the task lists (overdue, due today, blocked, who is carrying what).
+  const v1On = await remindersV1Enabled(orgId);
+  if (!v1On) logV1Skipped('slackDigest task lists');
+  const tasks = ((v1On ? taskRows ?? [] : []) as unknown as {
     title: string; due_date: string | null; status: string;
     projects: { name: string; slack_channel?: string | null } | null; profiles: { full_name: string | null } | null;
   }[]).map((t) => ({

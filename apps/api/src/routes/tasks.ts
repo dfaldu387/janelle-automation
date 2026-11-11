@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { TASK_CATEGORIES, TASK_KINDS, TASK_STATUSES, canManageTasks } from '@janelle/shared';
 import { requireAuth, requirePermission } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
-import { hasEmailOwner, hasTaskAssignment, hasTaskCategory, hasTaskComments, hasTaskCompletedBy, hasTaskCompletion } from '../lib/columns.js';
+import { hasColumn, hasEmailOwner, hasTaskAssignment, hasTaskCategory, hasTaskComments, hasTaskCompletedBy, hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { closeCopiesOfFinishedTasks, markTaskChecked } from '../services/tasks.js';
 import { resolveFollowUpsForTask } from '../services/followups.js';
@@ -50,10 +50,12 @@ tasksRouter.get(
     // until a short page proves the end, rather than trusting one request.
     const PAGE = 1000;
     const all: unknown[] = [];
+    // Soft-deleted tasks (migration 0042) never reach the board.
+    const softDelete = await hasColumn('tasks', 'deleted_at');
     for (let from = 0; ; from += PAGE) {
-      const { data, error } = await req.auth!.db
-        .from('tasks')
-        .select(columns)
+      let q = req.auth!.db.from('tasks').select(columns);
+      if (softDelete) q = q.is('deleted_at', null);
+      const { data, error } = await q
         .order('created_at', { ascending: false })
         .range(from, from + PAGE - 1);
       if (error) throw new Error(error.message);
@@ -77,8 +79,9 @@ tasksRouter.get(
   '/:id',
   asyncHandler(async (req, res) => {
     const db = req.auth!.db;
+    const softDelete = await hasColumn('tasks', 'deleted_at');
 
-    const { data: task, error } = await db
+    let detailQuery = db
       .from('tasks')
       .select(
         `id, title, detail, kind, status, assigned_to, assigned_role, seat, next_step,
@@ -86,8 +89,10 @@ tasksRouter.get(
          reminded_at, reminder_count${await completionColumns()}${await categoryColumns()},
          projects(name), vendors(name), profiles(full_name, email)`,
       )
-      .eq('id', req.params.id)
-      .maybeSingle();
+      .eq('id', req.params.id);
+    // A soft-deleted task reads as not found (migration 0042).
+    if (softDelete) detailQuery = detailQuery.is('deleted_at', null);
+    const { data: task, error } = await detailQuery.maybeSingle();
     if (error) throw new Error(error.message);
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
@@ -482,7 +487,13 @@ tasksRouter.post(
 );
 
 /**
- * Delete a task outright.
+ * Delete a task — SOFT delete (decision 2026-11-11, spec §8.4 "never delete
+ * tasks"). The row is kept: deleted_at / deleted_by are stamped, the task is
+ * closed as cancelled, and the board and panel hide it. Restoring is
+ * clearing deleted_at. Without migration 0042 this refuses rather than
+ * falling back to a hard delete.
+ *
+ * Original note:
  *
  * The board could only ever move a task between statuses, so a card raised
  * from a misread email — or a duplicate of one already being worked — could
@@ -499,15 +510,35 @@ tasksRouter.delete(
   asyncHandler(async (req, res) => {
     const { db, orgId, userId } = req.auth!;
 
+    if (!(await hasColumn('tasks', 'deleted_at'))) {
+      return res.status(503).json({ error: 'Deleting tasks needs database migration 0042 first. Nothing was deleted.' });
+    }
+
     const { data: task } = await db
       .from('tasks')
       .select('id, title, source_email_id')
       .eq('id', req.params.id)
+      .is('deleted_at', null)
       .maybeSingle();
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
-    const { error } = await db.from('tasks').delete().eq('id', req.params.id);
+    const now = new Date().toISOString();
+    const patch: Record<string, unknown> = {
+      status: 'cancelled',
+      deleted_at: now,
+      deleted_by: userId,
+      completion_note: `Deleted on ${now.slice(0, 10)}`,
+    };
+    if (await hasColumn('tasks', 'closed_reason')) Object.assign(patch, { closed_reason: 'deleted', closed_at: now });
+    const { error } = await db.from('tasks').update(patch).eq('id', req.params.id);
     if (error) throw new Error(error.message);
+
+    // The hard delete used to take its follow-ups with it (cascade); close them instead.
+    if (orgId) {
+      await resolveFollowUpsForTask(orgId, (task as { id: string }).id).catch((err) =>
+        console.error('[tasks] could not close follow-ups of a deleted task:', (err as Error).message),
+      );
+    }
 
     // Deleted on purpose: the email it came from must not raise it again the
     // next time the mail is scanned.
@@ -523,6 +554,7 @@ tasksRouter.delete(
       meta: {
         title: (task as { title: string }).title,
         from_email: Boolean((task as { source_email_id: string | null }).source_email_id),
+        soft: true,
       },
     });
 

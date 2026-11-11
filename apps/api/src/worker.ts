@@ -1,4 +1,4 @@
-import { isSupabaseConfigured } from './env.js';
+import { assertProductionSecrets, isSupabaseConfigured } from './env.js';
 import { startScheduler } from './services/scheduler.js';
 
 /**
@@ -12,6 +12,7 @@ import { startScheduler } from './services/scheduler.js';
  *
  *   npm run build && npm run worker --workspace apps/api
  */
+assertProductionSecrets();
 if (!isSupabaseConfigured()) {
   console.error('  ✖ Worker needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env');
   process.exit(1);

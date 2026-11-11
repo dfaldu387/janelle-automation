@@ -1,5 +1,5 @@
 import app from './app.js';
-import { env, isSupabaseConfigured } from './env.js';
+import { assertProductionSecrets, env, isSupabaseConfigured } from './env.js';
 import { startScheduler } from './services/scheduler.js';
 
 /**
@@ -9,6 +9,8 @@ import { startScheduler } from './services/scheduler.js';
  * with node-cron (see deploy/README.md). Nothing else is needed — no Vercel
  * Cron, no Supabase pg_cron.
  */
+assertProductionSecrets();
+
 app.listen(env.port, env.host, () => {
   console.log(`  ▸ Janelle API listening on http://${env.host}:${env.port}`);
   console.log(`  ▸ CORS origins: ${env.corsOrigins.join(', ') || '(any)'}`);

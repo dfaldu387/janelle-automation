@@ -83,8 +83,12 @@ export function consentUrl(state: string, service: GoogleService | 'all' = 'all'
 export type ReturnTo = 'settings' | 'dashboard';
 
 function sign(payload: string): string {
+  // No fallback key (v2 fast track, C3): a guessable 'dev' key let anyone forge
+  // a consent-link state. Without TOKEN_ENCRYPTION_KEY, signing fails loudly;
+  // production refuses to start without it (assertProductionSecrets in env.ts).
+  if (!env.tokenEncryptionKey) throw new Error('TOKEN_ENCRYPTION_KEY is not set; cannot sign Google consent state');
   return crypto
-    .createHmac('sha256', env.tokenEncryptionKey || 'dev')
+    .createHmac('sha256', env.tokenEncryptionKey)
     .update(payload)
     .digest('hex')
     .slice(0, 32);

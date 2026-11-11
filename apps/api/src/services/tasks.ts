@@ -4,7 +4,7 @@ import {
   type Seat, type SlaSettings, type TaskKind, type UserRole,
 } from '@janelle/shared';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { hasSeatColumn, hasSubtasks, hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
+import { hasColumn, hasSeatColumn, hasSubtasks, hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
 import { extractTask, type TaskExtraction } from './extract.js';
 import { loadStudioNames } from '../lib/studioNames.js';
 import { STUDIO_TEAM, isAutomatedAddress, isStudioAddress, isStudioMailbox } from '../lib/studioTeam.js';
@@ -490,14 +490,18 @@ function filled(t: DuplicateTaskRow): number {
 export interface TaskDedupe {
   ok: boolean;
   reason?: string;
-  /** Task rows deleted. */
+  /** Copies closed as duplicates (status done). Nothing is deleted any more (v2, spec §8.4). */
   removed: number;
   /** One entry per group folded together. */
   merged: { kept: string; removed: number }[];
 }
 
 /**
- * Remove tasks that are the same piece of work raised more than once.
+ * Close tasks that are the same piece of work raised more than once.
+ *
+ * v2 (spec §8.4, never delete tasks): the extra copies are set to done with
+ * completion_note "duplicate of <id>" (and closed_reason 'duplicate' once
+ * migration 0040 is applied) instead of being deleted, so history is kept.
  *
  * Creating a task now refuses a live duplicate, but the board already holds
  * the ones raised before that guard existed. Only LIVE work is considered:
@@ -537,6 +541,19 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
 
   const result: TaskDedupe = { ok: true, removed: 0, merged: [] };
   const deleted = new Set<string>();
+  const v2Columns = await hasColumn('tasks', 'closed_reason');
+  /** Close (never delete) the given copies as duplicates of `originalId`. */
+  const closeAsDuplicates = async (ids: string[], originalId: string) => {
+    const patch: Record<string, unknown> = { status: 'done', completion_note: `duplicate of ${originalId}` };
+    if (v2Columns) Object.assign(patch, { closed_reason: 'duplicate', closed_at: new Date().toISOString() });
+    const { error } = await supabaseAdmin!
+      .from('tasks')
+      .update(patch)
+      .eq('org_id', orgId)
+      .in('status', LIVE_STATUSES)
+      .in('id', ids);
+    if (error) throw new Error(error.message);
+  };
 
   for (const group of clusters) {
     if (group.length < 2) continue;
@@ -560,17 +577,12 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
         await supabaseAdmin.from('tasks').update(patch).eq('id', keep.id).eq('org_id', orgId);
       }
 
-      // follow_ups.task_id cascades, so a reminder raised against a copy
-      // goes with it rather than dangling.
-      const { error } = await supabaseAdmin
-        .from('tasks')
-        .delete()
-        .eq('org_id', orgId)
-        .in('id', losers.map((l) => l.id));
-      if (error) throw new Error(error.message);
+      // Closed, not deleted (v2). The follow-up sweep already closes
+      // follow-ups whose task is done (causeIsGone in followups.ts).
+      await closeAsDuplicates(losers.map((l) => l.id), keep.id);
       for (const l of losers) deleted.add(l.id);
 
-      // The emails the removed copies came from must not raise them again on the next scan.
+      // The emails the closed copies came from must not raise them again on the next scan.
       for (const l of losers) {
         const src = (l as DuplicateTaskRow & { source_email_id?: string | null }).source_email_id;
         if (src) await markTaskChecked(src);
@@ -592,38 +604,33 @@ export async function mergeDuplicateTasks(orgId: string): Promise<TaskDedupe> {
   // again arrives days later, not seconds.
   const { data: finishedRows } = await supabaseAdmin
     .from('tasks')
-    .select('title, project_id, completed_at')
+    .select('id, title, project_id, completed_at')
     .eq('org_id', orgId)
     .eq('status', 'done')
     .not('completed_at', 'is', null);
-  const closedAt = new Map<string, number[]>();
-  for (const f of (finishedRows ?? []) as { title: string; project_id: string | null; completed_at: string }[]) {
+  const closedAt = new Map<string, { at: number; id: string }[]>();
+  for (const f of (finishedRows ?? []) as { id: string; title: string; project_id: string | null; completed_at: string }[]) {
     const key = `${f.project_id ?? 'none'}::${titleKey(f.title)}`;
-    closedAt.set(key, [...(closedAt.get(key) ?? []), new Date(f.completed_at).getTime()]);
+    closedAt.set(key, [...(closedAt.get(key) ?? []), { at: new Date(f.completed_at).getTime(), id: f.id }]);
   }
   const SAME_MOMENT_MS = 10 * 60_000;
-  const copies = tasks.filter((t) => {
-    if (deleted.has(t.id)) return false;
+  const copies: { task: DuplicateTaskRow; originalId: string }[] = [];
+  for (const t of tasks) {
+    if (deleted.has(t.id)) continue;
     const stamps = closedAt.get(`${t.project_id ?? 'none'}::${titleKey(t.title)}`) ?? [];
     const made = new Date(t.created_at).getTime();
-    return stamps.some((c) => Math.abs(made - c) <= SAME_MOMENT_MS);
-  });
-  if (copies.length) {
-    const { error } = await supabaseAdmin
-      .from('tasks')
-      .delete()
-      .eq('org_id', orgId)
-      .in('status', LIVE_STATUSES)
-      .in('id', copies.map((t) => t.id));
-    if (error) {
-      console.error('[tasks] could not drop copies of finished work:', error.message);
-    } else {
-      for (const t of copies) {
-        const src = (t as DuplicateTaskRow & { source_email_id?: string | null }).source_email_id;
-        if (src) await markTaskChecked(src);
-      }
-      result.removed += copies.length;
-      result.merged.push(...copies.map((t) => ({ kept: `${t.title} (already finished)`, removed: 1 })));
+    const original = stamps.find((c) => Math.abs(made - c.at) <= SAME_MOMENT_MS);
+    if (original && original.id !== t.id) copies.push({ task: t, originalId: original.id });
+  }
+  for (const { task: t, originalId } of copies) {
+    try {
+      await closeAsDuplicates([t.id], originalId);
+      const src = (t as DuplicateTaskRow & { source_email_id?: string | null }).source_email_id;
+      if (src) await markTaskChecked(src);
+      result.removed += 1;
+      result.merged.push({ kept: `${t.title} (already finished)`, removed: 1 });
+    } catch (err) {
+      console.error('[tasks] could not close a copy of finished work:', (err as Error).message);
     }
   }
 

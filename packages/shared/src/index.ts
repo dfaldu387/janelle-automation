@@ -508,6 +508,10 @@ export interface Profile {
   email: string | null;
   role: UserRole;
   avatar_url: string | null;
+  /** v2, migration 0040. Optional until the migration is applied everywhere. */
+  timezone?: string;
+  manager_id?: string | null;
+  is_active?: boolean;
 }
 
 export interface Project {
@@ -592,6 +596,58 @@ export interface Task {
   source_email_id: string | null;
   due_date: string | null;
   created_at: string;
+  // ---- v2 fields, migration 0040. Optional until it is applied everywhere. ----
+  priority?: TaskPriority | null;
+  task_type?: TaskType | null;
+  /** The mailbox (profile) the Gmail thread lives in: thread IDs are per mailbox. */
+  source_mailbox_id?: string | null;
+  /** Gmail thread ID, or Houzz ID. */
+  source_ref?: string | null;
+  waiting_on?: string | null;
+  waiting_since?: string | null;
+  snooze_until?: string | null;
+  escalation_level?: number;
+  due_at?: string | null;
+  last_activity_at?: string | null;
+  closed_at?: string | null;
+  closed_reason?: ClosedReason | null;
+}
+
+// ---- Reminder v2 (janelle-reminders-v2-spec.md §3) ----
+export type TaskPriority = 'P1' | 'P2' | 'P3';
+export type TaskType = 'client' | 'vendor' | 'internal';
+export type TaskSource = 'gmail' | 'houzz' | 'manual';
+export type ClosedReason =
+  | 'user'
+  | 'auto_reply_sent'
+  | 'auto_houzz_status'
+  | 'auto_vendor_confirmed'
+  | 'backlog_cleanup'
+  | 'cancelled'
+  | 'duplicate'
+  | 'legacy'
+  /** Removed with the Delete button: soft delete, migration 0042. */
+  | 'deleted';
+export type NotificationType =
+  | 'digest'
+  | 'instant'
+  | 'escalation_owner'
+  | 'escalation_manager'
+  | 'weekly_pulse'
+  | 'followup_draft';
+export type NotificationStatus = 'sent' | 'dry_run' | 'skipped' | 'failed';
+
+export interface NotificationLogRow {
+  id: string;
+  org_id: string;
+  user_id: string | null;
+  task_id: string | null;
+  type: NotificationType;
+  status: NotificationStatus;
+  idempotency_key: string;
+  payload: Record<string, unknown> | null;
+  error: string | null;
+  sent_at: string;
 }
 
 export interface SpecGap {

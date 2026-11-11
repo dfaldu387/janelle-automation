@@ -1925,7 +1925,7 @@ export default function Tasks() {
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         title={`Delete "${deleteTarget?.title ?? ''}"?`}
-        message="This cannot be undone."
+        message="It is removed from the board but kept in the task history, so an admin can restore it."
         confirmLabel="Delete"
         onConfirm={confirmDelete}
         onCancel={() => setDeleteTarget(null)}

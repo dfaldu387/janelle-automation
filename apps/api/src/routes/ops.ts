@@ -22,6 +22,7 @@ import { runSlackReport } from '../services/slackReport.js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { readIngestSettings } from '../lib/ingestSettings.js';
 import { claimCronSlot } from '../lib/cronSlot.js';
+import { ReminderSettingsError, getReminderSettings, updateReminderSettings } from '../lib/reminderSettings.js';
 import { pacificHourNow, pacificWeekday } from '../lib/pacificTime.js';
 import {
   INGEST_RAN_FIELD,
@@ -359,6 +360,39 @@ opsRouter.get(
   asyncHandler(async (req, res) => {
     if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
     res.json({ data: await reviewTaskHygiene(req.auth!.orgId) });
+  }),
+);
+
+// Reminder v2 settings (lib/reminderSettings.ts). No screen yet; this is the
+// admin's way in. Reading is open to principal/coordinator; changing it —
+// which can switch real sending on — is principal only.
+opsRouter.get(
+  '/reminders-v2/settings',
+  requireRole('principal', 'coordinator'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    res.json({ data: await getReminderSettings(req.auth!.orgId) });
+  }),
+);
+opsRouter.patch(
+  '/reminders-v2/settings',
+  requireRole('principal'),
+  asyncHandler(async (req, res) => {
+    if (!req.auth!.orgId) return res.status(400).json({ error: 'No organization for user' });
+    try {
+      const saved = await updateReminderSettings(req.auth!.orgId, req.body ?? {});
+      await supabaseAdmin?.from('activity_log').insert({
+        org_id: req.auth!.orgId,
+        actor: req.auth!.userId,
+        action: 'reminders_v2.settings_changed',
+        entity: 'organizations',
+        meta: { patch: req.body ?? {}, dry_run: saved.dry_run, pilot_mode: saved.pilot_mode },
+      });
+      res.json({ data: saved });
+    } catch (err) {
+      if (err instanceof ReminderSettingsError) return res.status(400).json({ error: err.message });
+      throw err;
+    }
   }),
 );
 

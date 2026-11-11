@@ -15,6 +15,7 @@ import {
   type TaskState,
 } from './slack.js';
 import { pacificDate } from '../lib/pacificTime.js';
+import { logV1Skipped, remindersV1Enabled } from '../lib/remindersV1.js';
 import { ROUTE_FALLBACK_CODES, channelFor, joinIfNeeded, loadDirectory, type ChannelDirectory, type ProjectRef } from './slackRouting.js';
 
 /**
@@ -542,8 +543,10 @@ export async function runSlackSync(orgId: string, opts: { budgetMs?: number } = 
     await pass(slack.config.tasks, taskCursor, (p) => syncTasks(ctx, p), (c) => { taskCursor = c; });
     await pass(slack.config.followUps, followUpCursor, (p) => syncFollowUps(ctx, p), (c) => { followUpCursor = c; });
     // Then whatever has come into the yesterday–tomorrow window without changing.
+    // v2: these "now due" posts are a v1 reminder, so they follow the off-switch.
     try {
-      await announceDue(ctx, slack);
+      if (await remindersV1Enabled(orgId)) await announceDue(ctx, slack);
+      else logV1Skipped('slackSync announceDue');
     } catch (err) {
       if (!(err instanceof StopRun)) throw err;
     }

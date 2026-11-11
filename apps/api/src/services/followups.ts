@@ -5,6 +5,7 @@ import { orgSourceUserId } from '../lib/tokens.js';
 import { generate, isAiReady } from './anthropic.js';
 import { createDraft, gmailFor, gmailForReply, readSentMail, type DraftContent } from './gmail.js';
 import { isStudioAddress } from '../lib/studioTeam.js';
+import { logV1Skipped, remindersV1Enabled } from '../lib/remindersV1.js';
 
 /**
  * The nudges that are chasing a person for a response, and are therefore
@@ -451,6 +452,12 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
 
   const triggers: Trigger[] = [];
 
+  // v2: sections 0, 0b and 0c raise follow-ups from TASKS (quote overdue,
+  // client waiting, overdue/escalation/hygiene nudges) — v1 reminders, behind
+  // the off-switch. Sections 1–4 come from POs and projects and keep running.
+  const v1On = await remindersV1Enabled(orgId);
+  if (!v1On) logV1Skipped('followups task-based triggers (sections 0, 0b, 0c)');
+
   // 0. Quote SLA — the studio's sharpest pain point: a quote request that
   //    sits too long, where the client is left guessing. The rule is to tell
   //    the client something before they have to ask.
@@ -461,7 +468,7 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     .eq('kind', 'quote_request')
     .in('status', ['open', 'in_progress', 'blocked'])
     .lt('created_at', daysAgoIso(sla.quote_response_days));
-  for (const t of staleQuotes ?? []) {
+  for (const t of v1On ? staleQuotes ?? [] : []) {
     const proj = (t as { projects?: { name?: string; client_name?: string } }).projects;
     triggers.push({
       type: 'quote_overdue',
@@ -482,7 +489,7 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     .eq('kind', 'client_approval')
     .in('status', ['open', 'in_progress', 'blocked'])
     .lt('created_at', waitingCutoff);
-  for (const t of waiting ?? []) {
+  for (const t of v1On ? waiting ?? [] : []) {
     const proj = (t as { projects?: { name?: string; client_name?: string } }).projects;
     triggers.push({
       type: 'client_waiting',
@@ -520,7 +527,7 @@ export async function runFollowUps(orgId: string): Promise<FollowUpResult> {
     .eq('org_id', orgId)
     .in('status', ['open', 'in_progress', 'blocked']);
 
-  for (const row of liveTasks ?? []) {
+  for (const row of v1On ? liveTasks ?? [] : []) {
     const t = row as unknown as {
       id: string; title: string; status: string; due_date: string | null; next_step: string | null; created_at: string;
       reminded_at: string | null; reminder_count: number; assigned_to: string | null;

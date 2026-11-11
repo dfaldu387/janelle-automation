@@ -1,10 +1,9 @@
 import { TASK_CATEGORY_LABELS, defaultTaskCategory, type TaskCategory } from '@janelle/shared';
 import { hasTaskCategory, hasTaskCompletion } from '../lib/columns.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { orgSourceUserId } from '../lib/tokens.js';
 import { deliveryAddressFor, isStudioMailbox } from '../lib/studioTeam.js';
 import { pacificDate, pacificDayStart, pacificHourNow } from '../lib/pacificTime.js';
-import { gmailFor, sendMessage } from './gmail.js';
+import { sendMessage } from './gmail.js';
 import {
   middayOwnerEmail,
   middayPersonalEmail,
@@ -16,6 +15,7 @@ import {
 import { env } from '../env.js';
 import { latestBlockerNotes, unmatchedCheckinNotes } from './checkin.js';
 import { sendSlackReminders, type SlackReminderPerson, type SlackReminderResult } from './slackReminder.js';
+import { logV1Skipped, remindersV1Enabled } from '../lib/remindersV1.js';
 
 export type { ReminderSlot };
 
@@ -172,6 +172,8 @@ export function toPlan(rows: Task[], w: Window, slot: ReminderSlot, caps: PlanCa
 export interface MiddayReminderResult {
   ok: boolean;
   reason?: string;
+  /** Set when the v1 off-switch (lib/remindersV1.ts) stopped the send. */
+  skipped?: 'v1_reminders_disabled';
   slot: ReminderSlot;
   /** Personal reminders composed, one per teammate with something to be told. */
   personal: number;
@@ -191,6 +193,12 @@ export interface MiddayReminderResult {
  */
 export async function runMiddayReminder(orgId: string, slot: ReminderSlot = reminderSlotNow()): Promise<MiddayReminderResult> {
   if (!supabaseAdmin) return { ok: false, reason: 'supabase_not_configured', slot, personal: 0, ownerSent: false, slack: null };
+  // v2: v1 reminders are off unless explicitly re-enabled. Covers the
+  // scheduler and /api/ops/cron/midday-reminder, including ?force=1.
+  if (!(await remindersV1Enabled(orgId))) {
+    logV1Skipped('middayReminder');
+    return { ok: true, skipped: 'v1_reminders_disabled', slot, personal: 0, ownerSent: false, slack: null };
+  }
 
   // Category and completion time exist only once migrations 0026 and 0015 are
   // applied; until then category is worked out from the kind and the seat, and
@@ -254,10 +262,6 @@ export async function runMiddayReminder(orgId: string, slot: ReminderSlot = remi
   const relevant = tasks.filter((t) => belongsIn(t, slot, window));
   if (!relevant.length) return { ok: true, slot, personal: 0, ownerSent: false, slack: null };
 
-  const sender = await orgSourceUserId(orgId);
-  const gmail = sender ? await gmailFor(sender) : null;
-  if (!gmail) return { ok: false, reason: 'no_source_mailbox', slot, personal: 0, ownerSent: false, slack: null };
-
   // Why each blocked task is blocked, in the person's own words from their
   // check-in — so the morning plan carries the reason, not just the word —
   // and whatever they said last night that fitted no task in particular.
@@ -303,7 +307,7 @@ export async function runMiddayReminder(orgId: string, slot: ReminderSlot = remi
     try {
       // A teammate whose studio address has no mailbox (see mailboxLess) reads
       // at their personal address; sending to the studio address bounces.
-      await sendMessage(gmail, { to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
+      await sendMessage({ to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
       personal++;
     } catch (err) {
       console.error('[midday] personal reminder failed for', name, (err as Error).message);
@@ -345,7 +349,7 @@ export async function runMiddayReminder(orgId: string, slot: ReminderSlot = remi
       boardUrl,
     });
     try {
-      await sendMessage(gmail, {
+      await sendMessage({
         to: owner.email as string,
         subject: mail.subject,
         body: mail.text,

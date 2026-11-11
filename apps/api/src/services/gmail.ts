@@ -4,7 +4,7 @@ import { googleClientForUser, isGoogleAuthFailure, orgSourceUserId } from '../li
 import { SENDER_PROVIDER, oauthClient } from '../lib/google.js';
 import { decrypt, encrypt } from '../lib/crypto.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { STUDIO_DOMAINS, isStudioAddress } from '../lib/studioTeam.js';
+import { STUDIO_DOMAINS, STUDIO_MAILBOXES, isStudioAddress } from '../lib/studioTeam.js';
 import { env } from '../env.js';
 
 export interface PdfAttachment {
@@ -799,7 +799,15 @@ export async function deleteDraft(gmail: gmail_v1.Gmail, draftId: string): Promi
 }
 
 /**
- * Send one message, now.
+ * Send one message, now — ALWAYS from the studio sender (systems@).
+ *
+ * Decision 2026-11-11: every email the system sends goes from systems@ — sign-in
+ * codes, invitations, reconnect emails, the weekly activity email, reminders.
+ * There is no fallback to a principal's or anyone's personal mailbox any more:
+ * if systems@ is not connected, or Google refuses it, this throws and the
+ * caller reports the failure. (The paragraph below is the original rationale
+ * for which callers may send at all; it still applies.)
+ *
  *
  * Everything else the studio writes is left as a draft for a person to read
  * and send, and the app says so on several screens. This function is the
@@ -814,30 +822,30 @@ export async function deleteDraft(gmail: gmail_v1.Gmail, draftId: string): Promi
  * `gmail.compose`, already granted, covers sending as well as drafting, so
  * this needs no new consent from the studio.
  */
-export async function sendMessage(gmail: gmail_v1.Gmail, opts: DraftContent): Promise<string> {
-  // The sending mailbox (MAIL_FROM_ADDRESS, e.g. systems@) when it has been
-  // connected: the email then really comes from that account. If Google has
-  // refused it, the studio mailbox below sends instead, so codes and
-  // reminders still arrive.
-  const sender = opts.from ? null : await sendingMailbox();
-  if (sender) {
-    try {
-      const raw = buildRawMime({ ...opts, from: { name: SENDER_NAME, address: sender.address } });
-      const res = await sender.gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
-      return res.data.id ?? '';
-    } catch (err) {
-      if (!isGoogleAuthFailure(err)) throw err;
-      console.error(`[gmail] ${sender.address} refused by Google, sending from the studio mailbox:`, (err as Error).message);
-    }
-  }
+export async function sendMessage(opts: Omit<DraftContent, 'from'>): Promise<string> {
+  const sent = await sendFromStudioSender(opts);
+  return sent.id;
+}
 
-  // Every automatic email reads "Janelle Interiors" in the inbox, whichever
-  // studio mailbox sends it (the studio asked for this, Nov 2026). The
-  // address stays the mailbox's own, since Gmail only sends as that.
-  const address = opts.from ? null : await senderAddress(gmail);
-  const raw = buildRawMime(address ? { ...opts, from: { name: SENDER_NAME, address } } : opts);
-  const res = await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
-  return res.data.id ?? '';
+/**
+ * The one way the system sends email: from the connected sending mailbox
+ * (MAIL_FROM_ADDRESS), which must be the studio mailbox (systems@), and
+ * NOTHING else. No fallback to a principal's mailbox: if the sender is not
+ * connected, or Google refuses it, this throws and the caller records the
+ * failure. Used by sendMessage and by the v2 notifier.
+ */
+export class SenderNotConnectedError extends Error {}
+
+export async function sendFromStudioSender(opts: Omit<DraftContent, 'from'>): Promise<{ id: string; from: string }> {
+  const configured = env.mail.fromAddress;
+  if (!configured || !STUDIO_MAILBOXES.includes(configured)) {
+    throw new SenderNotConnectedError(`MAIL_FROM_ADDRESS must be the studio sender (${STUDIO_MAILBOXES.join(', ')}); got "${configured || '(empty)'}"`);
+  }
+  const sender = await sendingMailbox();
+  if (!sender) throw new SenderNotConnectedError('systems@ sender not connected');
+  const raw = buildRawMime({ ...opts, from: { name: SENDER_NAME, address: sender.address } });
+  const res = await sender.gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+  return { id: res.data.id ?? '', from: sender.address };
 }
 
 /** RFC 5322 forbids a line over 998 characters; base64 is wrapped at 76. */
