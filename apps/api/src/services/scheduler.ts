@@ -15,7 +15,12 @@ import { runSlackDigest } from './slackDigest.js';
 import { runSlackSync } from './slackSync.js';
 import { runTeamActivityDigest } from './teamActivity.js';
 import { pacificHourNow, pacificWeekday } from '../lib/pacificTime.js';
+import { resolveOrgId } from '../lib/org.js';
 import {
+  FOLLOW_UPS_COOLDOWN_MS,
+  FOLLOW_UPS_RAN_FIELD,
+  GOOGLE_KEEPALIVE_COOLDOWN_MS,
+  GOOGLE_KEEPALIVE_RAN_FIELD,
   INGEST_RAN_FIELD,
   MIDDAY_REMINDER_COOLDOWN_MS,
   MIDDAY_REMINDER_HOURS,
@@ -31,6 +36,8 @@ import {
   TEAM_ACTIVITY_HOUR,
   TEAM_ACTIVITY_RAN_FIELD,
   TEAM_ACTIVITY_WEEKDAY,
+  SLACK_SYNC_COOLDOWN_MS,
+  SLACK_SYNC_RAN_FIELD,
 } from '../lib/cronJobs.js';
 
 async function forEachOrg(fn: (orgId: string) => Promise<unknown>, label: string) {
@@ -134,7 +141,10 @@ export function startScheduler(): void {
   // existing messages in step. Runs every 5 minutes; the sync's own cursor
   // and task-level claim handle concurrency safely.
   every('*/5 * * * *', 'slack sync', () =>
-    forEachOrg((id) => runSlackSync(id, { budgetMs: 35_000 }), 'slack sync'),
+    forEachOrg(async (id) => {
+      if (!(await claimCronSlot(id, SLACK_SYNC_RAN_FIELD, SLACK_SYNC_COOLDOWN_MS))) return;
+      await runSlackSync(id, { budgetMs: 35_000 });
+    }, 'slack sync'),
   );
 
   // The morning briefing to Slack — the prioritised "what needs you today"
@@ -176,13 +186,23 @@ export function startScheduler(): void {
   });
 
   // The daily and weekly jobs, at the UTC times vercel.json gave them.
-  every('0 2 * * *', 'follow-ups', () => forEachOrg((id) => runFollowUps(id), 'follow-ups'), true);
+  every('0 2 * * *', 'follow-ups', () => forEachOrg(async (id) => {
+    if (!(await claimCronSlot(id, FOLLOW_UPS_RAN_FIELD, FOLLOW_UPS_COOLDOWN_MS))) return;
+    await runFollowUps(id);
+  }, 'follow-ups'), true);
   every('5 7 * * *', 'digest', () => forEachOrg((id) => runDigest(id), 'digest'), true);
   every('0 7 * * 1', 'report', () => forEachOrg((id) => runReport(id), 'report'), true);
 
   // Every Google connection refreshed, so none sits idle until Google
   // expires it — and a revoked one is found by this, not by a failed read.
   const keepalive = async () => {
+    // keepGoogleAlive covers every connection at once, so one studio-level
+    // lock stands for the whole run. No org → nothing to lock, run as before.
+    const orgId = await resolveOrgId();
+    if (orgId && !(await claimCronSlot(orgId, GOOGLE_KEEPALIVE_RAN_FIELD, GOOGLE_KEEPALIVE_COOLDOWN_MS))) {
+      console.log('[google] keep-alive skipped: another process ran it recently');
+      return;
+    }
     const r = await keepGoogleAlive();
     console.log(
       `[google] keep-alive: ${r.healthy}/${r.checked} healthy, ${r.needReconnect} need reconnect` +

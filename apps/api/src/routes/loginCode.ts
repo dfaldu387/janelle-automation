@@ -2,13 +2,12 @@ import { Router, type Request } from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/error.js';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { orgSourceUserId } from '../lib/tokens.js';
 import { deliveryAddressFor } from '../lib/studioTeam.js';
 import {
   CODE_TTL_MS, MAX_ATTEMPTS, MAX_CODES_PER_HOUR, RESEND_AFTER_MS,
   codeRequiredFor, hashCode, isVerified, maskEmail, newCode, rememberVerified, sameHash,
 } from '../lib/loginCode.js';
-import { gmailFor, sendMessage } from '../services/gmail.js';
+import { sendMessage } from '../services/gmail.js';
 import { loginCodeEmail } from '../services/emailTemplate.js';
 
 /**
@@ -85,13 +84,6 @@ loginCodeRouter.post(
       return res.status(429).json({ error: 'Too many codes sent. Wait an hour, or sign in again later.' });
     }
 
-    const sender = orgId ? await orgSourceUserId(orgId) : null;
-    const gmail = sender ? await gmailFor(sender) : null;
-    if (!gmail) {
-      console.error('[login-code] no studio mailbox to send from');
-      return res.status(503).json({ error: 'The code email could not be sent. Ask the studio admin, or sign in with your password.' });
-    }
-
     // Only the newest code works.
     await supabaseAdmin!
       .from('login_codes')
@@ -114,7 +106,7 @@ loginCodeRouter.post(
 
     try {
       const mail = loginCodeEmail({ code, minutes: CODE_TTL_MS / 60_000 });
-      await sendMessage(gmail, { to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
+      await sendMessage({ to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
     } catch (err) {
       await supabaseAdmin!.from('login_codes').delete().eq('id', (row as { id: string }).id);
       console.error('[login-code] send failed:', (err as Error).message);

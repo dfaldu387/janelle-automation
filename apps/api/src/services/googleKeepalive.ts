@@ -1,9 +1,9 @@
 import { supabaseAdmin } from '../lib/supabase.js';
 import { decrypt, encrypt } from '../lib/crypto.js';
 import { GOOGLE_SERVICES, oauthClient, reconnectConsentUrl, servicesGranted, type GoogleService } from '../lib/google.js';
-import { isGoogleAuthFailure, orgSourceUserId } from '../lib/tokens.js';
+import { isGoogleAuthFailure } from '../lib/tokens.js';
 import { GOOGLE_HEALTH_ACTION, latestGoogleHealth, type GoogleHealth } from '../lib/googleHealth.js';
-import { gmailFor, sendMessage } from './gmail.js';
+import { sendMessage } from './gmail.js';
 import { reconnectEmail } from './emailTemplate.js';
 import { deliveryAddressFor } from '../lib/studioTeam.js';
 
@@ -216,36 +216,16 @@ async function emailTheDropped(dropped: Dropped[], healthyByOrg: Map<string, str
     ((data ?? []) as { id: string; full_name: string | null; email: string | null }[]).map((p) => [p.id, p]),
   );
 
-  // Resolved once per studio: its source account if that is among the healthy,
-  // otherwise whichever account refreshed cleanly first.
-  const senderByOrg = new Map<string, string | null>();
-  async function senderFor(orgId: string): Promise<string | null> {
-    if (senderByOrg.has(orgId)) return senderByOrg.get(orgId)!;
-    const healthy = healthyByOrg.get(orgId) ?? [];
-    let id: string | null = null;
-    if (healthy.length) {
-      const source = await orgSourceUserId(orgId);
-      id = source && healthy.includes(source) ? source : healthy[0];
-    }
-    senderByOrg.set(orgId, id);
-    return id;
-  }
-  const gmailCache = new Map<string, Awaited<ReturnType<typeof gmailFor>>>();
+  // Sent from systems@ (sendMessage), so a studio whose own mailboxes have
+  // all dropped can still be told to reconnect. healthyByOrg is no longer
+  // needed to pick a sender.
+  void healthyByOrg;
 
   let sent = 0;
   for (const d of dropped) {
     const person = profile.get(d.user_id);
     if (!person?.email) continue;
     try {
-      const senderId = await senderFor(d.org_id);
-      if (!senderId) {
-        console.warn(`[google] cannot email ${person.email} to reconnect: no live mailbox in their studio`);
-        continue;
-      }
-      if (!gmailCache.has(senderId)) gmailCache.set(senderId, await gmailFor(senderId));
-      const gmail = gmailCache.get(senderId) ?? null;
-      if (!gmail) continue;
-
       const service: GoogleService | 'all' = d.services.length === 1 ? d.services[0] : 'all';
       const labels = d.services.map((s): 'Gmail' | 'Drive' => (s === 'gmail' ? 'Gmail' : 'Drive'));
       const mail = reconnectEmail({
@@ -255,7 +235,7 @@ async function emailTheDropped(dropped: Dropped[], healthyByOrg: Map<string, str
       });
       // Write to where they actually read mail — a teammate with no studio
       // mailbox (mailboxLess) would otherwise bounce every reconnect nudge.
-      await sendMessage(gmail, { to: deliveryAddressFor(person.email), subject: mail.subject, body: mail.text, html: mail.html });
+      await sendMessage({ to: deliveryAddressFor(person.email), subject: mail.subject, body: mail.text, html: mail.html });
       sent++;
 
       await supabaseAdmin.from('activity_log').insert({

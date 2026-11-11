@@ -60,7 +60,9 @@ export const env = {
    */
   invite: {
     cc: optional('INVITE_CC', 'janelle@janelleinteriors.com'),
-    bcc: optional('INVITE_BCC', 'dfaldu387@gmail.com'),
+    // Empty by default (v2 fast track, C3): invitations used to BCC a
+    // developer's personal address unless INVITE_BCC was set.
+    bcc: optional('INVITE_BCC', ''),
   },
 
   /**
@@ -106,6 +108,15 @@ export const env = {
   },
 
   /**
+   * Reminder v2 (services/notifier.ts). When set, every v2 reminder goes to
+   * this address instead of the real person — for development and testing.
+   * Leave EMPTY in production once the pilot is approved.
+   */
+  reminders: {
+    testRecipient: optional('REMINDERS_TEST_RECIPIENT').trim(),
+  },
+
+  /**
    * Email a code after signing in and keep the app closed until it is entered.
    * Each way of signing in is switched on separately. Needs migration 0039 first.
    */
@@ -128,3 +139,16 @@ export const isOpenAiConfigured = () => Boolean(env.openai.apiKey);
 // `required` is kept for values we may enforce later; reference it so
 // strict unused checks stay quiet without changing behaviour.
 void required;
+
+/**
+ * Secrets production must have before it serves anything (v2 fast track, C3).
+ * Called first thing by index.ts and worker.ts. Outside production it only
+ * warns, so local development still starts.
+ */
+export function assertProductionSecrets(): void {
+  const missing = ['TOKEN_ENCRYPTION_KEY'].filter((name) => !(process.env[name] ?? '').trim());
+  if (!missing.length) return;
+  const message = `Missing required secret(s): ${missing.join(', ')}`;
+  if (process.env.NODE_ENV === 'production') throw new Error(`${message} — refusing to start in production.`);
+  console.warn(`  ⚠ ${message} (Google consent links and stored keys will not work).`);
+}

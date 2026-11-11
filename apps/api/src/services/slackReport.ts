@@ -5,6 +5,7 @@ import { pacificDate, pacificDayStart, pacificHourNow } from '../lib/pacificTime
 import { env } from '../env.js';
 import { SlackError, postMessage, type SlackMessage } from './slack.js';
 import { joinIfNeeded, loadDirectory, type ChannelDirectory } from './slackRouting.js';
+import { logV1Skipped, remindersV1Enabled } from '../lib/remindersV1.js';
 
 /**
  * The task report, one message per channel, three times a day (9am, midday
@@ -37,7 +38,7 @@ interface ReportTask {
 
 export interface SlackReportResult {
   ok: boolean;
-  skipped?: 'not_connected' | 'paused' | 'no_channels';
+  skipped?: 'not_connected' | 'paused' | 'no_channels' | 'v1_reminders_disabled';
   /** Tasks in each report, and whether it was posted. */
   reports: { kind: ReportKind; channel: string; tasks: number; posted: boolean; error?: string }[];
 }
@@ -136,6 +137,11 @@ async function readTasks(orgId: string): Promise<Record<ReportKind, ReportTask[]
 /** Post the three reports to their channels. A channel left blank in Settings is skipped. */
 export async function runSlackReport(orgId: string): Promise<SlackReportResult> {
   if (!supabaseAdmin) return { ok: false, reports: [] };
+  // Every report here is a task list, so the whole job stands down.
+  if (!(await remindersV1Enabled(orgId))) {
+    logV1Skipped('slackReport');
+    return { ok: true, skipped: 'v1_reminders_disabled', reports: [] };
+  }
 
   const slack = await resolveSlack(orgId);
   if (!slack.token) return { ok: true, skipped: 'not_connected', reports: [] };

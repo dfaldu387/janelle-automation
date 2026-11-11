@@ -142,7 +142,7 @@ async function main() {
         skipped++;
         continue;
       }
-      await sendMessage(gmail, { to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
+      await sendMessage({ to: deliveryAddressFor(email), subject: mail.subject, body: mail.text, html: mail.html });
       await supabaseAdmin.from('activity_log').insert({
         org_id: r.org_id,
         actor: null,

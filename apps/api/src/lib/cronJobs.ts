@@ -52,3 +52,16 @@ export const TEAM_ACTIVITY_HOUR = 7;
  * Monday is never skipped).
  */
 export const TEAM_ACTIVITY_COOLDOWN_MS = 6 * 24 * 3600_000;
+
+// ---- Locks added in v2 fast track (Task C3) for jobs that had none, so a
+// second process (API + worker, or a restart overlap) cannot run them twice.
+
+/** Nightly follow-ups (02:00 UTC). Once a day, with room for a late tick. */
+export const FOLLOW_UPS_RAN_FIELD = 'follow_ups_ran_at';
+export const FOLLOW_UPS_COOLDOWN_MS = 20 * 3600_000;
+/** Slack sync, polled every 5 minutes; the lock is just under that. */
+export const SLACK_SYNC_RAN_FIELD = 'slack_sync_ran_at';
+export const SLACK_SYNC_COOLDOWN_MS = 4 * 60_000;
+/** Google keep-alive, every 6 hours (and once at boot). */
+export const GOOGLE_KEEPALIVE_RAN_FIELD = 'google_keepalive_ran_at';
+export const GOOGLE_KEEPALIVE_COOLDOWN_MS = 5 * 3600_000;
